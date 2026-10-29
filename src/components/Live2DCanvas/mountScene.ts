@@ -318,6 +318,15 @@ export async function mountLive2DScene(
       // doing its thing) and don't fire a tap.
       if (Math.hypot(dx, dy) > 6 || dt > 350) return;
       const r = canvas.getBoundingClientRect();
+      // The canvas can be much wider than the model; a tap on empty
+      // canvas is not a tap on her. With autoDensity, CSS pixels from
+      // the canvas corner are stage coordinates.
+      const bounds = (
+        model as unknown as {
+          getBounds: () => { contains: (x: number, y: number) => boolean };
+        }
+      ).getBounds();
+      if (!bounds.contains(e.clientX - r.left, e.clientY - r.top)) return;
       const ny = (e.clientY - r.top) / r.height;
       // Three vertical zones — the lower third of the avatar covers
       // her hand holding the paint brush, so taps there should always
