@@ -73,7 +73,10 @@ export default function AvatarStage({
 
   // Leave ~100 px of headroom for the chat bubble and top bar.
   const H = Math.max(260, size.h - 120);
-  const W = Math.max(220, Math.min(size.w - 24, Math.round(H * 0.7)));
+  // Window width minus 12 px side gutters (no longer capped by the
+  // height), so the horizontal nudge can reach the edge of a wide tiled
+  // or full-screen window.
+  const W = Math.max(220, size.w - 24);
 
   return (
     <div
