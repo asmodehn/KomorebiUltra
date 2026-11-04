@@ -65,7 +65,9 @@ export function useChatStream(opts: {
             const s = settingsRef.current;
             const modelLabel =
               e.route === "cloud"
-                ? `openrouter:${s?.openrouter_model ?? "?"}`
+                ? s?.acp_agent_command
+                  ? `acp:${s.acp_agent_command.trim().split(/\s+/)[0].split(/[\\/]/).pop()}`
+                  : `openrouter:${s?.openrouter_model ?? "?"}`
                 : e.route === "local"
                   ? `local:${(s?.local_model_path ?? "").split(/[\\/]/).pop() || "?"}`
                   : `skill:${e.route}`;

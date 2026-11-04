@@ -4,7 +4,7 @@ use super::events::{emit, ChatEventOut};
 use super::ChatService;
 use crate::settings;
 use futures::StreamExt;
-use komorebi_cloud::{OpenRouterClient, StreamEvent};
+use komorebi_cloud::{AcpClient, OpenRouterClient, StreamEvent};
 use komorebi_router::ChatMessage;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -50,15 +50,23 @@ pub(super) async fn stream_cloud(
     id: &str,
     messages: &[ChatMessage],
 ) -> Result<String, String> {
-    let api_key = settings::get_openrouter_key(app)
-        .ok_or_else(|| "OpenRouter API key is not set. Open settings and add one.".to_string())?;
-    let model = settings::get_openrouter_model(app);
-    let client = OpenRouterClient::new(api_key).map_err(|e| e.to_string())?;
-
-    let mut stream = client
-        .stream_chat(&model, messages)
-        .await
-        .map_err(|e| e.to_string())?;
+    let mut stream = if let Some(command) = settings::get_acp_agent_command(app) {
+        AcpClient::from_command(&command)
+            .map_err(|e| e.to_string())?
+            .stream_chat(messages)
+            .await
+            .map_err(|e| e.to_string())?
+    } else {
+        let api_key = settings::get_openrouter_key(app).ok_or_else(|| {
+            "OpenRouter API key is not set. Open settings and add one.".to_string()
+        })?;
+        let model = settings::get_openrouter_model(app);
+        let client = OpenRouterClient::new(api_key).map_err(|e| e.to_string())?;
+        client
+            .stream_chat(&model, messages)
+            .await
+            .map_err(|e| e.to_string())?
+    };
 
     let mut acc = String::new();
     while let Some(evt) = stream.next().await {
