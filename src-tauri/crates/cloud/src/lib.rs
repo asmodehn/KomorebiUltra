@@ -11,6 +11,9 @@ use komorebi_router::ChatMessage;
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
 
+mod acp;
+pub use acp::AcpClient;
+
 pub const DEFAULT_MODEL: &str = "anthropic/claude-3.5-sonnet";
 const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
 
@@ -24,6 +27,8 @@ pub enum CloudError {
     Api { status: u16, body: String },
     #[error("malformed stream: {0}")]
     Stream(String),
+    #[error("acp agent: {0}")]
+    Acp(String),
 }
 
 #[derive(Debug, Clone, Serialize)]
