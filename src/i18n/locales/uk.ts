@@ -241,6 +241,8 @@ export const UK: Record<DictKey, string> = {
   "settings.smart.classifier.placeholder": "meta-llama/llama-3.2-3b-instruct",
   "settings.smart.hint_on": "У режимі Авто швидкий класифікатор вирішує, використовувати локальну LLM чи хмару. По таймауту — назад на правила за ключовими словами. Детект навичок лишається за ключовими словами.",
   "settings.smart.hint_off": "Потрібен API-ключ OpenRouter.",
+  "settings.acp.label": "ACP-агент",
+  "settings.acp.hint": "Команда агента Agent Client Protocol, наприклад claude-agent-acp. Якщо задана, хмарний чат відповідає через цього агента замість OpenRouter; розумна маршрутизація, ігровий тренер і зір і далі використовують OpenRouter. Аргументи розділяються пробілами (без лапок). З claude-agent-acp персона Komorebi замінює власний промпт агента, а його інструменти, користувацькі налаштування та збереження сесій вимкнені. Інші агенти зберігають свою конфігурацію; Komorebi відхиляє їхні запити на дозволи.",
   "settings.rag.label": "Знання — локальні файли (RAG)",
   "settings.rag.enable": "Використовувати індексовані папки як контекст для відповідей",
   "settings.rag.folder_info": "{docs} док. · {chunks} фрагментів",
