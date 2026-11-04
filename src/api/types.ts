@@ -28,6 +28,7 @@ export interface PublicSettings {
   smart_routing: boolean;
   classifier_model: string;
   rag_enabled: boolean;
+  acp_agent_command: string | null;
   audio_input_device: string | null;
   audio_output_device: string | null;
   llm_gpu_layers: number | null;

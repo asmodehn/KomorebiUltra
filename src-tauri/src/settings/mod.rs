@@ -97,11 +97,11 @@ pub use imagegen::{
     set_imagegen_size, set_imagegen_steps,
 };
 pub use routing::{
-    get_chat_tool_calls_enabled, get_classifier_model, get_gpu_layers,
+    get_acp_agent_command, get_chat_tool_calls_enabled, get_classifier_model, get_gpu_layers,
     get_local_classifier_model_path, get_local_model_path, get_mode, get_openrouter_model,
-    get_rag_enabled, get_smart_routing, set_chat_tool_calls_enabled, set_classifier_model,
-    set_gpu_layers, set_local_classifier_model_path, set_local_model_path, set_mode,
-    set_openrouter_model, set_rag_enabled, set_smart_routing,
+    get_rag_enabled, get_smart_routing, set_acp_agent_command, set_chat_tool_calls_enabled,
+    set_classifier_model, set_gpu_layers, set_local_classifier_model_path, set_local_model_path,
+    set_mode, set_openrouter_model, set_rag_enabled, set_smart_routing,
 };
 pub use telemetry::{
     ensure_anon_token, get_anon_token, get_telemetry_enabled, get_telemetry_endpoint,
@@ -163,6 +163,7 @@ pub struct PublicSettings {
     pub smart_routing: bool,
     pub classifier_model: String,
     pub rag_enabled: bool,
+    pub acp_agent_command: Option<String>,
     pub audio_input_device: Option<String>,
     pub audio_output_device: Option<String>,
     pub llm_gpu_layers: Option<i64>,
@@ -255,6 +256,7 @@ pub fn public_snapshot(app: &AppHandle<Wry>) -> PublicSettings {
         smart_routing: routing::get_smart_routing(app),
         classifier_model: routing::get_classifier_model(app),
         rag_enabled: routing::get_rag_enabled(app),
+        acp_agent_command: routing::get_acp_agent_command(app),
         audio_input_device: voice::get_audio_input(app),
         audio_output_device: voice::read_audio_output(app),
         llm_gpu_layers: routing::get_gpu_layers(app),

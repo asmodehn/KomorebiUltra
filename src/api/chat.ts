@@ -39,6 +39,10 @@ export async function setClassifierModel(model: string): Promise<void> {
   await invoke("set_classifier_model", { model });
 }
 
+export async function setAcpAgentCommand(command: string): Promise<void> {
+  await invoke("set_acp_agent_command", { command });
+}
+
 export async function listOpenRouterModels(): Promise<OpenRouterModel[]> {
   return invoke<OpenRouterModel[]>("list_openrouter_models");
 }
