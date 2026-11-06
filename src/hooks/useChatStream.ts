@@ -3,7 +3,7 @@ import { avatarState } from "../avatarState";
 import { stripMoodTags } from "../emotion";
 import { onChat, type ChatEvent, type PublicSettings } from "../api";
 
-export type Route = "local" | "cloud" | "skill";
+export type Route = "local" | "cloud" | "skill" | "acp";
 
 export interface LastTurn {
   id: string | number;
@@ -65,12 +65,18 @@ export function useChatStream(opts: {
             const s = settingsRef.current;
             const modelLabel =
               e.route === "cloud"
-                ? s?.acp_agent_command
-                  ? `acp:${s.acp_agent_command.trim().split(/\s+/)[0].split(/[\\/]/).pop()}`
-                  : `openrouter:${s?.openrouter_model ?? "?"}`
+                ? `openrouter:${s?.openrouter_model ?? "?"}`
                 : e.route === "local"
                   ? `local:${(s?.local_model_path ?? "").split(/[\\/]/).pop() || "?"}`
-                  : `skill:${e.route}`;
+                  : e.route === "acp"
+                    ? `acp:${
+                        (s?.acp_agent_command ?? "")
+                          .trim()
+                          .split(/\s+/)[0]
+                          .split(/[\\/]/)
+                          .pop() || "?"
+                      }`
+                    : `skill:${e.route}`;
             lastTurnRef.current = {
               ...lastTurnRef.current,
               id: e.id,

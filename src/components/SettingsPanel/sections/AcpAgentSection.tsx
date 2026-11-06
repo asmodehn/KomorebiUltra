@@ -1,6 +1,7 @@
-// ACP agent: when a command is set, Cloud-routed chat turns go to that
-// Agent Client Protocol agent (e.g. claude-agent-acp) instead of
-// OpenRouter. Classifier, coach and vision calls stay on OpenRouter.
+// ACP agent: when a command is set, chat turns go to that Agent Client
+// Protocol agent (e.g. opencode acp) instead of the Komorebi engine.
+// Weather and skills still answer without a model; coach, vision and
+// image generation keep their own providers.
 
 import { useEffect, useState } from "react";
 import { setAcpAgentCommand, type PublicSettings } from "../../../api";

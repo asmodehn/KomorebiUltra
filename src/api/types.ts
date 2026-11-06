@@ -4,7 +4,7 @@
 // Keeping types in one place avoids import cycles between those modules.
 
 export type ChatEvent =
-  | { kind: "started"; id: string; route: "local" | "cloud" | "skill" }
+  | { kind: "started"; id: string; route: "local" | "cloud" | "skill" | "acp" }
   | { kind: "token"; id: string; text: string }
   | { kind: "done"; id: string; full_text: string }
   | { kind: "error"; id: string; message: string };

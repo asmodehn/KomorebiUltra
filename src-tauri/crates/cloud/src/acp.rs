@@ -11,6 +11,11 @@
 //! Komorebi. What the agent runs without asking is up to its own config,
 //! except for `claude-agent-acp`, whose tools and settings are switched off
 //! (see [`Turn::session_new`]).
+//!
+//! Every turn opens its session in a dedicated, empty workspace directory:
+//! `cwd` selects the project configuration an agent discovers, and it is
+//! the blast radius of anything the agent writes on its own.
+//! `KOMOREBI_AGENT_WORKSPACE` overrides it for experiments.
 
 use crate::{CloudError, StreamEvent, TokenStream};
 use komorebi_router::{ChatMessage, Role};
@@ -25,10 +30,28 @@ const ID_INITIALIZE: u64 = 1;
 const ID_SESSION_NEW: u64 = 2;
 const ID_PROMPT: u64 = 3;
 
+/// Directory every session is opened in. `cwd` decides which project
+/// configuration an agent discovers (opencode reads the directory's models,
+/// agents, skills, MCP servers) and where anything it writes lands, so it is
+/// a dedicated directory rather than the shared temp dir.
+/// `KOMOREBI_AGENT_WORKSPACE` overrides it for experiments.
+fn workspace() -> PathBuf {
+    if let Some(dir) = std::env::var_os("KOMOREBI_AGENT_WORKSPACE").filter(|v| !v.is_empty()) {
+        return PathBuf::from(dir);
+    }
+    std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+        .unwrap_or_else(std::env::temp_dir)
+        .join("komorebi")
+        .join("agent-workspace")
+}
+
 #[derive(Clone)]
 pub struct AcpClient {
     program: PathBuf,
     args: Vec<String>,
+    cwd: PathBuf,
 }
 
 impl AcpClient {
@@ -59,13 +82,20 @@ impl AcpClient {
         Ok(Self {
             program,
             args: words.collect(),
+            cwd: workspace(),
         })
     }
 
     pub async fn stream_chat(&self, messages: &[ChatMessage]) -> Result<TokenStream, CloudError> {
+        std::fs::create_dir_all(&self.cwd).map_err(|e| {
+            CloudError::Acp(format!(
+                "cannot create the agent workspace {}: {e}",
+                self.cwd.display()
+            ))
+        })?;
         let mut child = Command::new(&self.program)
             .args(&self.args)
-            .current_dir(std::env::temp_dir())
+            .current_dir(&self.cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             // Agents log freely on stderr; inherit it so it can never fill
@@ -79,7 +109,7 @@ impl AcpClient {
         let mut stdin = child.stdin.take().expect("stdin is piped");
         let stdout = child.stdout.take().expect("stdout is piped");
         let (system, prompt) = flatten(messages);
-        let mut turn = Turn::new(system, prompt);
+        let mut turn = Turn::new(system, prompt).in_dir(self.cwd.clone());
 
         Ok(Box::pin(async_stream::stream! {
             // Owned by the stream: dropping it (on cancel) kills the agent.
@@ -130,6 +160,8 @@ enum Step {
 struct Turn {
     system: String,
     prompt: String,
+    /// Directory the agent's session is opened in.
+    cwd: PathBuf,
     /// The agent is `claude-agent-acp` (it advertises `_meta.claudeCode`):
     /// the system text replaces its coding preset instead of opening the
     /// prompt.
@@ -141,8 +173,15 @@ impl Turn {
         Self {
             system,
             prompt,
+            cwd: workspace(),
             claude: false,
         }
+    }
+
+    /// Open the session in `cwd` instead of the default workspace.
+    fn in_dir(mut self, cwd: PathBuf) -> Self {
+        self.cwd = cwd;
+        self
     }
 
     /// `session/new`, with `claude-agent-acp`'s extension options when the
@@ -151,7 +190,7 @@ impl Turn {
     /// tools (Komorebi's own tool loop stays in charge), no transcript left
     /// on disk.
     fn session_new(&self) -> Value {
-        let mut params = json!({ "cwd": std::env::temp_dir(), "mcpServers": [] });
+        let mut params = json!({ "cwd": self.cwd.to_string_lossy(), "mcpServers": [] });
         if self.claude {
             params["_meta"] = json!({
                 "systemPrompt": self.system,
@@ -450,5 +489,11 @@ mod tests {
         assert_eq!(c.program, PathBuf::from("/opt/agent"));
         assert_eq!(c.args, vec!["--flag", "value"]);
         assert!(AcpClient::from_command("   ").is_err());
+    }
+
+    #[test]
+    fn session_is_opened_in_the_given_workspace() {
+        let t = Turn::new(String::new(), "hi".into()).in_dir(PathBuf::from("/work/agent"));
+        assert_eq!(t.session_new()["cwd"], "/work/agent");
     }
 }
