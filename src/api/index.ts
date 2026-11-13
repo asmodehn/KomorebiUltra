@@ -3,6 +3,7 @@
 // Importers continue to use `from "../api"` (or relative variants); this
 // folder transparently replaces the old monolithic `src/api.ts`.
 
+export * from "./window";
 export * from "./types";
 export * from "./chat";
 export * from "./models";

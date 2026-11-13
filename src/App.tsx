@@ -28,6 +28,9 @@ import {
   saveGeneratedImage,
   sendMessage,
   setListenEnabled,
+  getWindowOverlayInfo,
+  setWindowOverlay,
+  type WindowOverlayMode,
   visionCaptureFull,
   visionWithImage,
   type PublicSettings,
@@ -40,6 +43,36 @@ import { useChatStream, type LastTurn, type Route } from "./hooks/useChatStream"
 import { useImageStream } from "./hooks/useImageStream";
 import { useRelationship } from "./hooks/useRelationship";
 import { useListenController } from "./hooks/useListenController";
+
+const OVERLAY_STORAGE_KEY = "komorebi.overlay_mode";
+
+/**
+ * Overlay is the product default: a transparent, frontmost layer covering
+ * the monitor. The choice is remembered so an explicit "normal" survives a
+ * restart instead of the startup effect forcing overlay every launch.
+ */
+function readStoredOverlayMode(): WindowOverlayMode {
+  try {
+    const v = localStorage.getItem(OVERLAY_STORAGE_KEY);
+    // Only two modes exist: the monitor-covering overlay and a windowed
+    // window. `always_on_top` was an early label for "frontmost without the
+    // overlay treatment" — it never covered the monitor, so it is retired
+    // into `overlay`.
+    if (v === "normal" || v === "overlay") return v;
+    if (v === "always_on_top") return "overlay";
+  } catch {
+    /* storage unavailable (private mode, etc.) — use the default */
+  }
+  return "overlay";
+}
+
+function storeOverlayMode(mode: WindowOverlayMode): void {
+  try {
+    localStorage.setItem(OVERLAY_STORAGE_KEY, mode);
+  } catch {
+    /* best effort: the mode still applies for this session */
+  }
+}
 
 export default function App() {
   // ── UI panels ──────────────────────────────────────────────────────
@@ -161,6 +194,69 @@ export default function App() {
     }
   }, []);
 
+  // ── Overlay mode: frontmost, covering the monitor ──────────────────────
+  const [overlayMode, setOverlayMode] = useState<WindowOverlayMode>(readStoredOverlayMode);
+
+  /** Single place that changes the mode: keeps the window, the state and
+   * the remembered choice in sync. */
+  const changeOverlayMode = useCallback((next: WindowOverlayMode) => {
+    setOverlayMode(next);
+    storeOverlayMode(next);
+  }, []);
+
+  /** Apply a requested overlay/windowed mode through the backend and sync
+   * the local state + remembered choice. Shared by the F11 and Alt+O
+   * handlers so both paths run the exact same two-mode logic (and surface
+   * backend failures instead of silently leaving stale state behind).
+   *
+   * The choice is persisted *before* the backend call: a window-type change
+   * recreates the webview in-process, so the page reloads. If the write
+   * landed after the reload the fresh page would read the old mode and
+   * immediately switch back. */
+  const applyRequestedMode = useCallback(
+    async (next: WindowOverlayMode) => {
+      changeOverlayMode(next);
+      try {
+        const eff = await setWindowOverlay(next);
+        if (eff && eff !== next) changeOverlayMode(eff);
+      } catch (err) {
+        // The invoke may never answer when the window is being replaced; the
+        // reloaded page re-reads the mode from the backend, so this is safe.
+        console.warn("komorebi: failed to apply overlay mode", next, err);
+      }
+    },
+    [changeOverlayMode],
+  );
+
+  /** F11: toggle between the two window states we offer — the overlay
+   * (frontmost, covering the monitor) and a plain windowed window. There is
+   * deliberately no third state: compositor
+   * fullscreen would lose the transparency, so "fullscreen without overlay"
+   * is not a mode we expose. */
+  const handleToggleWindow = useCallback(async () => {
+    await applyRequestedMode(overlayMode === "overlay" ? "normal" : "overlay");
+  }, [overlayMode, applyRequestedMode]);
+
+  /** Leave overlay mode outright. Overlay → normal; the window becomes
+   * draggable like a normal Komorebi window again. */
+  const handleExitOverlay = useCallback(async () => {
+    await applyRequestedMode("normal");
+  }, [applyRequestedMode]);
+
+  // Escape leaves overlay mode (unless the composer owns the key while
+  // open) — an explicit off-ramp that does not depend on a global hotkey
+  // being pressed.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      if (overlayMode !== "overlay") return;
+      if (inputOpen) return;
+      void handleExitOverlay();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [overlayMode, inputOpen, handleExitOverlay]);
+
   // ── Hooks (effects extracted out of App for clarity) ──────────────
   useHotkeys({
     onToggleInput: useCallback(() => setInputOpen((v) => !v), []),
@@ -168,6 +264,13 @@ export default function App() {
       () => void openPickerWithPrompt(""),
       [openPickerWithPrompt],
     ),
+    onOverlay: useCallback(async () => {
+      // Two-mode toggle (matches F11 and the move grip): fullscreen overlay
+      // ↔ windowed. `always_on_top` is an implementation detail of overlay,
+      // not a third user-facing state.
+      await applyRequestedMode(overlayMode === "overlay" ? "normal" : "overlay");
+    }, [overlayMode, applyRequestedMode]),
+    onToggleWindow: handleToggleWindow,
   });
 
   useTtsAudio({
@@ -185,6 +288,30 @@ export default function App() {
     setBubbleText,
     setUserEcho,
   });
+
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      const info = await getWindowOverlayInfo();
+      if (!mounted || !info.supported) return;
+      // A pinned KOMOREBI_START_MODE wins; otherwise use the remembered
+      // choice. Two modes only: normal (windowed) vs overlay.
+      // If the backend is not already in that mode (e.g. a plain dev start
+      // with a remembered overlay), request it: changing the window type
+      // recreates the window in-process, which `applyRequestedMode` handles.
+      const next: WindowOverlayMode = info.forced
+        ? info.mode
+        : readStoredOverlayMode();
+      if (!mounted) return;
+      if (next !== info.mode) await applyRequestedMode(next);
+      else changeOverlayMode(next);
+    })().catch(() => {
+      /* window mode is cosmetic: keep the in-page state on failure */
+    });
+    return () => {
+      mounted = false;
+    };
+  }, [applyRequestedMode, changeOverlayMode]);
 
   useChatStream({
     activeIdRef,
