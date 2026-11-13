@@ -1,14 +1,14 @@
 import { useEffect, useRef, useState } from "react";
-import { getCurrentWindow } from "@tauri-apps/api/window";
-import { invoke } from "@tauri-apps/api/core";
+import { setAvatarOffset } from "../api";
 import AnimatedPlaceholder from "./AnimatedPlaceholder";
 import Live2DCanvas from "./Live2DCanvas";
+import { modelClientRect } from "./Live2DCanvas/mountScene";
 
 /**
  * Avatar stage: renders the Live2D canvas when a model URL is configured
  * (and the Cubism runtime is available), otherwise shows an animated SVG
- * placeholder. Doubles as the window drag handle in windowed mode; in
- * overlay mode the window is moved through the top bar's grip instead.
+ * placeholder. Doubles as the character move handle: a grab nudges the
+ * character; the top bar keeps the explicit window move grip.
  *
  * Tracks window size so the avatar scales responsively when the user
  * resizes the Komorebi window.
@@ -25,8 +25,8 @@ export default function AvatarStage({
   zoom?: number;
   offsetX?: number;
   offsetY?: number;
-  /** Overlay mode: a layer surface cannot be dragged by the client, and a
-   * tap on the character opens the message bar instead of a reaction. */
+  /** Character move handle in both modes; empty-stage grabs are
+   * click-through (overlay) / no-ops (windowed). */
   overlayMode?: boolean;
   /** Overlay-mode character tap: open the message bar. */
   onStageTap?: () => void;
@@ -35,6 +35,8 @@ export default function AvatarStage({
     w: window.innerWidth,
     h: window.innerHeight,
   }));
+  // Live drag offset (fractions of the avatar box), committed on release.
+  const [offset, setOffset] = useState({ x: offsetX, y: offsetY });
 
   useEffect(() => {
     const onResize = () =>
@@ -43,43 +45,75 @@ export default function AvatarStage({
     return () => window.removeEventListener("resize", onResize);
   }, []);
 
-  const lastDragReactRef = useRef(0);
+  // External offset changes (settings sliders, reset) flow back in.
+  useEffect(() => {
+    setOffset({ x: offsetX, y: offsetY });
+  }, [offsetX, offsetY]);
 
-  const startDrag = (e: React.PointerEvent) => {
-    if (e.button !== 0) return;
-    // Overlay mode is a layer surface: the client cannot move it, and the
-    // top bar's grip leaves the mode before dragging instead.
-    if (overlayMode) return;
-    // Defer native window-drag until the pointer actually moves a few
-    // pixels. Otherwise even a quick click is consumed by the OS drag
-    // loop and the canvas's `pointerup` (tap-to-react / play special
-    // motion) never fires.
-    const startX = e.clientX;
-    const startY = e.clientY;
-    let dragStarted = false;
-    const onMove = (ev: PointerEvent) => {
-      if (dragStarted) return;
-      if (Math.hypot(ev.clientX - startX, ev.clientY - startY) < 6) return;
-      dragStarted = true;
-      cleanup();
-      void getCurrentWindow().startDragging();
-      // Throttle drag reactions: at most one every 12 s so a long drag
-      // session doesn't spam TTS.
-      const now = performance.now();
-      if (now - lastDragReactRef.current > 12_000) {
-        lastDragReactRef.current = now;
-        void invoke("react_event", { kind: "drag" }).catch(() => {});
-      }
+  const dragRef = useRef<{
+    x0: number;
+    y0: number;
+    t: number;
+    ox: number;
+    oy: number;
+  } | null>(null);
+
+  // ── The character is the move handle in BOTH modes (windowed included):
+  // a grab on her nudges the character (avatar nudge, saved on release); a
+  // grab on the empty stage does nothing (overlay: click-through, the
+  // desktop keeps the click). The window itself is moved through the top-bar
+  // move grip, which converts to a native window drag in windowed mode.
+  const onStagePointerDown = (e: React.PointerEvent) => {
+    const model = modelClientRect();
+    const inside =
+      !model ||
+      (e.clientX >= model.left &&
+        e.clientX <= model.left + model.width &&
+        e.clientY >= model.top &&
+        e.clientY <= model.top + model.height);
+    if (!inside) {
+      // Grabbed empty stage: click-through (overlay) / nothing to move
+      // (windowed) — neither drags the window.
+      return;
+    }
+    dragRef.current = {
+      x0: e.clientX,
+      y0: e.clientY,
+      t: performance.now(),
+      ox: offset.x,
+      oy: offset.y,
     };
-    const onUp = () => cleanup();
-    const cleanup = () => {
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
-      window.removeEventListener("pointercancel", onUp);
-    };
-    window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp);
-    window.addEventListener("pointercancel", onUp);
+  };
+  const onStagePointerMove = (e: React.PointerEvent) => {
+    const d = dragRef.current;
+    if (!d) return;
+    const dx = e.clientX - d.x0;
+    const dy = e.clientY - d.y0;
+    const nx = d.ox + (W > 0 ? dx / (W / 2) : 0);
+    const ny = d.oy + (H > 0 ? dy / (H / 2) : 0);
+    setOffset((o) => (o.x === nx && o.y === ny ? o : { x: nx, y: ny }));
+  };
+
+  const onStagePointerUp = async (e: React.PointerEvent) => {
+    const d = dragRef.current;
+    dragRef.current = null;
+    if (!d) return;
+    const dx = e.clientX - d.x0;
+    const dy = e.clientY - d.y0;
+    const dt = performance.now() - d.t;
+    const isTap = Math.hypot(dx, dy) <= 6 && dt <= 350;
+    const nx = d.ox + (W > 0 ? dx / (W / 2) : 0);
+    const ny = d.oy + (H > 0 ? dy / (H / 2) : 0);
+    if (isTap) {
+      // Tap: the canvas' gated handler owns the reaction/input hand-off.
+      return;
+    }
+    setOffset({ x: nx, y: ny });
+    try {
+      await setAvatarOffset(nx, ny);
+    } catch {
+      // Best effort: the live preview already applied the drag.
+    }
   };
 
   // Leave ~100 px of headroom for the chat bubble and top bar.
@@ -93,7 +127,13 @@ export default function AvatarStage({
     <div
       className="interactive"
       data-avatar-stage
-      onPointerDown={startDrag}
+      onPointerDown={onStagePointerDown}
+      onPointerMove={onStagePointerMove}
+      onPointerUp={onStagePointerUp}
+      onPointerCancel={(e: React.PointerEvent) => {
+        dragRef.current = null;
+        void onStagePointerUp(e);
+      }}
       style={{
         position: "absolute",
         left: "50%",
@@ -104,7 +144,7 @@ export default function AvatarStage({
         display: "flex",
         alignItems: "flex-end",
         justifyContent: "center",
-        cursor: "grab",
+        cursor: "default",
       }}
     >
       {modelUrl ? (
@@ -113,8 +153,8 @@ export default function AvatarStage({
           width={W}
           height={H}
           zoom={zoom}
-          offsetX={offsetX}
-          offsetY={offsetY}
+          offsetX={offset.x}
+          offsetY={offset.y}
           overlay={overlayMode}
           onCharacterTap={() => onStageTap?.()}
         />

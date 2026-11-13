@@ -54,17 +54,19 @@ export default function Live2DCanvas({
     const { model, anchored, canvasW, canvasH } = ref;
     const fit = Math.min(canvasW / model.width, canvasH / model.height) * 0.9;
     const scale = fit * Math.max(0.1, zoomRef.current);
-    model.scale.set(scale);
+    // Only write the transform when it actually changed. During a character
+    // drag every pointermove re-runs this (via the offset effect) and
+    // redundant transform writes produced transient "character zoomed in"
+    // frames mid-drag before settling.
+    const sp = model.scale as unknown as { x: number; set: (s: number) => void };
+    if (sp.x !== scale) sp.set(scale);
     // Offsets are fractions of the canvas box: ±1.0 = ±half the box.
     const cx = canvasW / 2 + offsetXRef.current * (canvasW / 2);
     const cy = canvasH / 2 + offsetYRef.current * (canvasH / 2);
-    if (anchored) {
-      model.x = cx;
-      model.y = cy;
-    } else {
-      model.x = cx - (model.width * scale) / 2;
-      model.y = cy - (model.height * scale) / 2;
-    }
+    const px = anchored ? cx : cx - (model.width * scale) / 2;
+    const py = anchored ? cy : cy - (model.height * scale) / 2;
+    if (model.x !== px) model.x = px;
+    if (model.y !== py) model.y = py;
   };
 
   // Push prop updates into refs and re-layout live.
