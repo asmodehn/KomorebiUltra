@@ -134,6 +134,20 @@ fn strip_inline_tag_block(text: &str, name: &str) -> String {
     out
 }
 
+#[inline]
+fn utf8_char_len(b: u8) -> usize {
+    // ASCII or unexpected continuation byte (shouldn't happen at boundary).
+    if b < 0xC0 {
+        1
+    } else if b < 0xE0 {
+        2
+    } else if b < 0xF0 {
+        3
+    } else {
+        4
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::sanitize_for_tts;
@@ -147,19 +161,5 @@ mod tests {
     #[test]
     fn symbol_only_text_becomes_empty() {
         assert_eq!(sanitize_for_tts("~ ^_^ ~"), "");
-    }
-}
-
-#[inline]
-fn utf8_char_len(b: u8) -> usize {
-    // ASCII or unexpected continuation byte (shouldn't happen at boundary).
-    if b < 0xC0 {
-        1
-    } else if b < 0xE0 {
-        2
-    } else if b < 0xF0 {
-        3
-    } else {
-        4
     }
 }

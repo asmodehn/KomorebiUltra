@@ -4,7 +4,7 @@
 // Keeping types in one place avoids import cycles between those modules.
 
 export type ChatEvent =
-  | { kind: "started"; id: string; route: "local" | "cloud" | "skill" }
+  | { kind: "started"; id: string; route: "local" | "cloud" | "skill" | "acp" }
   | { kind: "token"; id: string; text: string }
   | { kind: "done"; id: string; full_text: string }
   | { kind: "error"; id: string; message: string };
@@ -28,6 +28,7 @@ export interface PublicSettings {
   smart_routing: boolean;
   classifier_model: string;
   rag_enabled: boolean;
+  acp_agent_command: string | null;
   audio_input_device: string | null;
   audio_output_device: string | null;
   llm_gpu_layers: number | null;

@@ -20,6 +20,10 @@ const KEY_SMART_ROUTING: &str = "smart_routing";
 const KEY_CLASSIFIER_MODEL: &str = "classifier_model";
 const KEY_RAG_ENABLED: &str = "rag_enabled";
 const KEY_CHAT_TOOL_CALLS: &str = "chat_tool_calls_enabled";
+/// Command line of an ACP agent (e.g. `claude-agent-acp`). When set,
+/// Cloud-routed chat turns go to it instead of OpenRouter; background
+/// calls (classifier, coach, vision) stay on OpenRouter.
+const KEY_ACP_AGENT_COMMAND: &str = "acp_agent_command";
 
 pub fn get_openrouter_model(app: &AppHandle<Wry>) -> String {
     read_string(app, KEY_OPENROUTER_MODEL)
@@ -131,4 +135,12 @@ pub fn get_chat_tool_calls_enabled(app: &AppHandle<Wry>) -> bool {
 
 pub fn set_chat_tool_calls_enabled<R: Runtime>(app: &AppHandle<R>, on: bool) -> Result<()> {
     write_bool(app, KEY_CHAT_TOOL_CALLS, on)
+}
+
+pub fn get_acp_agent_command(app: &AppHandle<Wry>) -> Option<String> {
+    read_string(app, KEY_ACP_AGENT_COMMAND)
+}
+
+pub fn set_acp_agent_command<R: Runtime>(app: &AppHandle<R>, command: &str) -> Result<()> {
+    write_optional_string(app, KEY_ACP_AGENT_COMMAND, command)
 }

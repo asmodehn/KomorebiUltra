@@ -86,6 +86,7 @@ pub fn run() {
             commands::routing::set_smart_routing,
             commands::routing::set_classifier_model,
             commands::routing::set_rag_enabled,
+            commands::routing::set_acp_agent_command,
             commands::routing::set_openrouter_model,
             commands::routing::set_chat_tool_calls_enabled,
             commands::routing::set_llm_gpu_layers,

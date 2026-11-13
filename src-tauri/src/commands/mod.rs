@@ -83,8 +83,9 @@ pub use relationship::{
     set_user_name,
 };
 pub use routing::{
-    list_openrouter_models, set_chat_tool_calls_enabled, set_classifier_model, set_llm_gpu_layers,
-    set_mode, set_openrouter_key, set_openrouter_model, set_rag_enabled, set_smart_routing,
+    list_openrouter_models, set_acp_agent_command, set_chat_tool_calls_enabled,
+    set_classifier_model, set_llm_gpu_layers, set_mode, set_openrouter_key, set_openrouter_model,
+    set_rag_enabled, set_smart_routing,
 };
 pub use stt::{
     cancel_recording, clear_deepgram_key, list_audio_devices, set_audio_input, set_audio_output,

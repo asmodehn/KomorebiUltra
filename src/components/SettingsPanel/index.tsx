@@ -34,6 +34,7 @@ import OpenRouterModelSection from "./sections/OpenRouterModelSection";
 import RagSection from "./sections/RagSection";
 import RelationshipSection from "./sections/RelationshipSection";
 import SmartRoutingSection from "./sections/SmartRoutingSection";
+import AcpAgentSection from "./sections/AcpAgentSection";
 import WakeWordSection from "./sections/WakeWordSection";
 import CommunitySection from "./sections/community/CommunitySection";
 import TrainingSection from "./sections/community/TrainingSection";
@@ -193,6 +194,9 @@ export default function SettingsPanel({ open, onClose, onChanged }: Props) {
 
             {tab === "basic" ? (
               <>
+                <SectionCard>
+                  <AcpAgentSection settings={settings} refresh={refresh} />
+                </SectionCard>
                 {/* Pick a model the OpenRouter key applies to. */}
                 <SectionCard>
                   <OpenRouterModelSection settings={settings} refresh={refresh} />

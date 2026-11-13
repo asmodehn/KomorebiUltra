@@ -35,6 +35,11 @@ pub fn set_rag_enabled(app: AppHandle<Wry>, enabled: bool) -> Result<(), String>
 }
 
 #[tauri::command]
+pub fn set_acp_agent_command(app: AppHandle<Wry>, command: String) -> Result<(), String> {
+    settings::set_acp_agent_command(&app, &command).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub fn set_openrouter_model(app: AppHandle<Wry>, model: String) -> Result<(), String> {
     settings::set_openrouter_model(&app, &model).map_err(|e| e.to_string())
 }

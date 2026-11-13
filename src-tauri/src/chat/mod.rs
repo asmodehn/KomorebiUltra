@@ -2,7 +2,7 @@
 //! from the chosen engine back to the frontend via Tauri events.
 //!
 //! Events emitted (all namespaced `chat:*`, serialized as `ChatEventOut`):
-//! - `chat:started` — `{ route: "local" | "cloud" | "skill", id: String }`
+//! - `chat:started` — `{ route: "local" | "cloud" | "skill" | "acp", id: String }`
 //! - `chat:token`   — `{ id, text }`
 //! - `chat:done`    — `{ id, full_text }`
 //! - `chat:error`   — `{ id, message }`
@@ -12,8 +12,8 @@
 //! - [`prompts`]      — system prompts (persona, mood-tag, tool protocol).
 //! - [`rag`]          — RAG context assembly from the workspace index.
 //! - [`tool_loop`]    — `<tool_call>` parsing & retry loop for the LLM.
-//! - [`skill_picker`] — cloud → local → keyword skill resolution.
-//! - [`engines`]      — local/cloud engine builders + streaming wrappers.
+//! - [`skill_picker`] — embedding → cloud → local → keyword skill resolution.
+//! - [`engines`]      — local/cloud providers + the ACP agent engine.
 //! - [`vision`]       — image+text generation pipeline.
 //! - [`speak`]        — fire-and-forget TTS + text sanitization.
 //! - [`runner`]       — `run_generation` orchestrator.

@@ -267,6 +267,8 @@ export const EN = {
   "settings.smart.classifier.placeholder": "meta-llama/llama-3.2-3b-instruct",
   "settings.smart.hint_on": "When Auto mode is active, a quick classifier call decides whether to use the local LLM or the cloud. Falls back to keyword rules on timeout. Skill detection stays keyword-based.",
   "settings.smart.hint_off": "Requires an OpenRouter API key.",
+  "settings.acp.label": "ACP agent",
+  "settings.acp.hint": "Command of an Agent Client Protocol agent, e.g. opencode acp or claude-agent-acp. When set, chat turns go to the agent instead of the Komorebi engine: the agent chooses its own model and runs its own tools, and Komorebi's local/cloud routing and tool loop are skipped. Weather and skills still answer without a model; game coach, vision and image generation keep their own providers. Arguments are split on spaces (no quoting). With claude-agent-acp, Komorebi's persona replaces the agent's prompt, and its tools, user settings and saved sessions stay off.",
   // RAG
   "settings.rag.label": "Knowledge — local files (RAG)",
   "settings.rag.enable": "Use indexed folders as context for answers",

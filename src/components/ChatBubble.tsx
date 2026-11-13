@@ -27,7 +27,7 @@ const feedbackBtn: React.CSSProperties = {
 
 interface Props {
   text: string | null;
-  route?: "local" | "cloud" | "skill" | null;
+  route?: "local" | "cloud" | "skill" | "acp" | null;
   thinking?: boolean;
   userEcho?: string | null;
   imageBase64?: string | null;
