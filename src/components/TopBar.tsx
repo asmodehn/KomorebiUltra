@@ -1,14 +1,26 @@
-import { useLocale, t } from "../i18n";
-import { STAGE_LABELS, type RelationshipState } from "../api";
+import { useLocale, t, type DictKey } from "../i18n";
+import {
+  STAGE_LABELS,
+  type RelationshipState,
+  type WindowOverlayMode,
+} from "../api";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   CloseIcon,
   DownloadIcon,
   EarIcon,
   EyeIcon,
   GearIcon,
+  GripIcon,
+  LayersIcon,
   RefreshIcon,
   WarningIcon,
 } from "./icons";
+
+const OVERLAY_LABEL_KEYS: Record<WindowOverlayMode, DictKey> = {
+  normal: "topbar.overlay.normal",
+  overlay: "topbar.overlay.overlay",
+};
 
 export interface TopBarProps {
   mode: string;
@@ -27,6 +39,10 @@ export interface TopBarProps {
   onToggleAutoWatch: () => void;
   relationship: RelationshipState | null;
   showRelationshipBadge: boolean;
+  overlayMode: WindowOverlayMode;
+  onToggleOverlay: () => void;
+  /** Leave overlay mode outright (back to a plain, movable window). */
+  onExitOverlay: () => void;
 }
 
 /**
@@ -48,6 +64,7 @@ export function TopBar(props: TopBarProps) {
         position: "absolute",
         top: 8,
         right: 8,
+        zIndex: 10,
         display: "flex",
         gap: 6,
         alignItems: "center",
@@ -55,6 +72,25 @@ export function TopBar(props: TopBarProps) {
         color: "#fff",
       }}
     >
+      {/* Window move grip: in overlay mode the avatar no longer drags the
+         window, so the top bar keeps an explicit handle. Clicking it while
+         in overlay mode first leaves overlay — a layer surface cannot be
+         moved by the client anyway — so the user gets a real window to drag. */}
+      <button
+        onPointerDown={(e) => {
+          if (e.button !== 0) return;
+          if (props.overlayMode === "overlay") {
+            void props.onExitOverlay();
+            return;
+          }
+          void getCurrentWindow().startDragging();
+        }}
+        style={{ ...iconBtn, cursor: "move", touchAction: "none" }}
+        title={t("topbar.move")}
+        aria-label={t("topbar.move")}
+      >
+        <GripIcon size={13} />
+      </button>
       <span
         style={{
           padding: "3px 8px",
@@ -77,6 +113,32 @@ export function TopBar(props: TopBarProps) {
       {props.showRelationshipBadge && props.relationship && (
         <RelationshipBadge state={props.relationship} />
       )}
+      {/* Overlay toggle — Alt+O and Escape (composer closed) do the same.
+         Icon stays constant; the green dot marks the fullscreen overlay. */}
+      <button
+        onClick={props.onToggleOverlay}
+        style={iconBtnStyle(props.overlayMode === "overlay")}
+        title={`${t("topbar.overlay")}: ${t(
+          OVERLAY_LABEL_KEYS[props.overlayMode],
+        )} (Alt+O)`}
+        aria-label={`${t("topbar.overlay")} ${t(OVERLAY_LABEL_KEYS[props.overlayMode])}`}
+      >
+        <LayersIcon size={14} />
+        {props.overlayMode === "overlay" && (
+          <span
+            style={{
+              position: "absolute",
+              top: 3,
+              right: 3,
+              width: 6,
+              height: 6,
+              borderRadius: "50%",
+              background: "#8ef0a8",
+              boxShadow: "0 0 6px rgba(142,240,168,0.85)",
+            }}
+          />
+        )}
+      </button>
       <button
         onClick={props.onToggleListen}
         disabled={!props.listenReady}

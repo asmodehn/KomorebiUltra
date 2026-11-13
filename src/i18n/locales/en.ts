@@ -16,6 +16,10 @@ export const EN = {
   "topbar.quit": "Quit Komorebi",
   "topbar.no_key": "No OpenRouter key",
   "topbar.key_saved": "OpenRouter key saved",
+  "topbar.overlay": "Overlay mode",
+  "topbar.overlay.normal": "window",
+  "topbar.overlay.overlay": "overlay",
+  "topbar.move": "Move window",
   // Common
   "common.save": "Save",
   "common.clear": "Clear",

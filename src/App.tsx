@@ -659,6 +659,9 @@ export default function App() {
         showRelationshipBadge={
           (settings?.relationship_visibility ?? "indicator") !== "hidden"
         }
+        overlayMode={overlayMode}
+        onToggleOverlay={() => void handleToggleWindow()}
+        onExitOverlay={() => void handleExitOverlay()}
       />
       <RegionPicker
         open={pickerOpen}

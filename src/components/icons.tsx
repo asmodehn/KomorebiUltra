@@ -138,6 +138,27 @@ export function WarningIcon(p: IconProps = {}) {
   );
 }
 
+/** Stacked squares: window stacking / overlay layer. */
+export function LayersIcon(p: IconProps = {}) {
+  return (
+    <svg {...base(p)}>
+      {p.title && <title>{p.title}</title>}
+      <rect x="3" y="3" width="13" height="13" rx="2" />
+      <path d="M8 21h11a2 2 0 0 0 2-2V8" />
+    </svg>
+  );
+}
+
+/** Drag grip: window move handle. */
+export function GripIcon(p: IconProps = {}) {
+  return (
+    <svg {...base(p)} strokeWidth={p.strokeWidth ?? 2.4}>
+      {p.title && <title>{p.title}</title>}
+      <path d="M9 6h.01M15 6h.01M9 12h.01M15 12h.01M9 18h.01M15 18h.01" />
+    </svg>
+  );
+}
+
 export function ThumbUpIcon(p: IconProps = {}) {
   return (
     <svg {...base(p)}>
