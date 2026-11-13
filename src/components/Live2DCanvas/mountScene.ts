@@ -31,6 +31,21 @@ export interface ModelInfo {
   canvasH: number;
 }
 
+interface StageBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  contains: (x: number, y: number) => boolean;
+}
+
+let modelRectProbe: (() => DOMRect) | null = null;
+
+/** Client rect of the mounted model, or null when none is mounted. */
+export function modelClientRect(): DOMRect | null {
+  return modelRectProbe ? modelRectProbe() : null;
+}
+
 export interface MountOptions {
   container: HTMLDivElement;
   modelUrl: string;
@@ -298,6 +313,16 @@ export async function mountLive2DScene(
     const canvas = app.view as HTMLCanvasElement;
     canvas.style.pointerEvents = "auto";
     canvas.style.cursor = "grab";
+    // Model bounds in stage coordinates, which with autoDensity are CSS
+    // pixels from the canvas corner.
+    const modelBounds = () =>
+      (model as unknown as { getBounds: () => StageBounds }).getBounds();
+    const probe = () => {
+      const r = canvas.getBoundingClientRect();
+      const b = modelBounds();
+      return new DOMRect(r.left + b.x, r.top + b.y, b.width, b.height);
+    };
+    modelRectProbe = probe;
     let pressX = 0;
     let pressY = 0;
     let pressAt = 0;
@@ -321,12 +346,7 @@ export async function mountLive2DScene(
       // The canvas can be much wider than the model; a tap on empty
       // canvas is not a tap on her. With autoDensity, CSS pixels from
       // the canvas corner are stage coordinates.
-      const bounds = (
-        model as unknown as {
-          getBounds: () => { contains: (x: number, y: number) => boolean };
-        }
-      ).getBounds();
-      if (!bounds.contains(e.clientX - r.left, e.clientY - r.top)) return;
+      if (!modelBounds().contains(e.clientX - r.left, e.clientY - r.top)) return;
       const ny = (e.clientY - r.top) / r.height;
       // Three vertical zones — the lower third of the avatar covers
       // her hand holding the paint brush, so taps there should always
@@ -358,6 +378,7 @@ export async function mountLive2DScene(
     canvas.addEventListener("pointerup", onPointerUp);
 
     return () => {
+      if (modelRectProbe === probe) modelRectProbe = null;
       unsubscribe();
       unsubState();
       window.removeEventListener("pointermove", onMove);

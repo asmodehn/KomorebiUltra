@@ -19,6 +19,7 @@
 //!   region-picker overlay state ([`vision::RegionPickerState`]).
 //! * [`imagegen`] — image-generation provider settings + spawn/cancel.
 //! * [`avatar`] — Live2D model URL, zoom, on-screen offset.
+//! * [`overlay`] — input region (click-through outside the UI).
 //! * [`agent`] — proactive / desktop-automation toggles.
 //! * [`game_coach`] — Game Coach (text/vision split, proposal 0002).
 //! * [`weather`] — weather provider + report.
@@ -43,6 +44,7 @@ pub mod game_coach;
 pub mod imagegen;
 pub mod intent;
 pub mod models;
+pub mod overlay;
 pub mod rag;
 pub mod relationship;
 pub mod routing;
@@ -77,6 +79,7 @@ pub use models::{
     clear_local_classifier_model, delete_asset, download_asset, list_assets,
     set_local_classifier_model, set_local_model,
 };
+pub use overlay::set_input_region;
 pub use rag::{rag_add_folder, rag_list_folders, rag_reindex, rag_remove_folder};
 pub use relationship::{
     get_relationship_state, get_resolved_language, reset_relationship, set_language,

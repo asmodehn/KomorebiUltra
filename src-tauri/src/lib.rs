@@ -192,6 +192,7 @@ pub fn run() {
             commands::avatar::set_avatar_zoom,
             commands::avatar::set_avatar_offset,
             commands::avatar::set_live2d_model,
+            commands::overlay::set_input_region,
             commands::window::set_window_overlay,
             commands::window::window_overlay_info,
             // Agent

@@ -43,6 +43,7 @@ import { useChatStream, type LastTurn, type Route } from "./hooks/useChatStream"
 import { useImageStream } from "./hooks/useImageStream";
 import { useRelationship } from "./hooks/useRelationship";
 import { useListenController } from "./hooks/useListenController";
+import { useInputRegion } from "./hooks/useInputRegion";
 
 const OVERLAY_STORAGE_KEY = "komorebi.overlay_mode";
 
@@ -196,6 +197,7 @@ export default function App() {
 
   // ── Overlay mode: frontmost, covering the monitor ──────────────────────
   const [overlayMode, setOverlayMode] = useState<WindowOverlayMode>(readStoredOverlayMode);
+  useInputRegion(overlayMode);
 
   /** Single place that changes the mode: keeps the window, the state and
    * the remembered choice in sync. */

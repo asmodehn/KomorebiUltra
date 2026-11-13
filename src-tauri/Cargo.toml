@@ -114,6 +114,10 @@ opt-level = 2
 strip = false
 
 [target.'cfg(target_os = "linux")'.dependencies]
+# GTK input shape for the overlay region (commands/overlay.rs). Already a
+# transitive dependency of Tauri's wry; pinned here to use it directly.
+gtk = "0.18"
+
 # Wayland layer-shell support (opt-in): install `libgtk-layer-shell-dev`,
 # then build with `--features layer-shell` and launch with
 # `KOMOREBI_LAYER_SHELL=1` so tiling compositors don't tile the window.
