@@ -13,6 +13,7 @@ pub enum ChatEventOut {
 }
 
 pub(super) fn emit(app: &AppHandle<Wry>, evt: ChatEventOut) {
+    super::turn_log::observe(app, &evt);
     if let Err(e) = app.emit("chat", &evt) {
         tracing::warn!(?e, "failed to emit chat event");
     }

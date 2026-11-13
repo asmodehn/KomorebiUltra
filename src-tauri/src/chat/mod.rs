@@ -16,6 +16,7 @@
 //! - [`engines`]      — local/cloud providers + the ACP agent engine.
 //! - [`vision`]       — image+text generation pipeline.
 //! - [`speak`]        — fire-and-forget TTS + text sanitization.
+//! - [`turn_log`]     — opt-in raw turn log for reviewing replies.
 //! - [`runner`]       — `run_generation` orchestrator.
 
 #![allow(unused_imports)]
@@ -28,6 +29,7 @@ mod runner;
 mod skill_picker;
 pub(crate) mod speak;
 mod tool_loop;
+mod turn_log;
 mod vision;
 
 use komorebi_router::ChatMessage;
@@ -78,6 +80,7 @@ impl ChatService {
 
     pub async fn clear(&self) {
         self.history.lock().await.clear();
+        turn_log::reset();
     }
 
     pub fn cancel(&self) {
@@ -92,6 +95,7 @@ impl ChatService {
 /// Entry point invoked by the Tauri command. Spawns the generation on the
 /// async runtime and returns an id the frontend can correlate events with.
 pub fn spawn_generation(app: AppHandle<Wry>, id: String, prompt: String) {
+    turn_log::begin(&app, &id, &prompt, false);
     tauri::async_runtime::spawn(async move {
         if let Err(e) = runner::run_generation(app.clone(), id.clone(), prompt).await {
             events::emit(&app, ChatEventOut::Error { id, message: e });
@@ -111,6 +115,7 @@ pub fn spawn_vision_generation(
     prompt: String,
     png_bytes: Vec<u8>,
 ) {
+    turn_log::begin(&app, &id, &prompt, true);
     tauri::async_runtime::spawn(async move {
         if let Err(e) =
             vision::run_vision_generation(app.clone(), id.clone(), prompt, png_bytes).await
