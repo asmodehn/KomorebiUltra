@@ -17,6 +17,8 @@ export default function Live2DCanvas({
   zoom = 1,
   offsetX = 0,
   offsetY = 0,
+  overlay = false,
+  onCharacterTap,
 }: {
   modelUrl: string;
   width: number;
@@ -24,6 +26,10 @@ export default function Live2DCanvas({
   zoom?: number;
   offsetX?: number;
   offsetY?: number;
+  /** Overlay mode: taps on the character open the message bar instead of
+   * firing a random reaction. */
+  overlay?: boolean;
+  onCharacterTap?: () => void;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [failed, setFailed] = useState(false);
@@ -33,6 +39,12 @@ export default function Live2DCanvas({
   const zoomRef = useRef(zoom);
   const offsetXRef = useRef(offsetX);
   const offsetYRef = useRef(offsetY);
+  // Overlay-mode tap hand-off. Kept in a ref so the mount effect does not
+  // re-run (and re-load the model) on every render.
+  const onCharacterTapRef = useRef(onCharacterTap);
+  useEffect(() => {
+    onCharacterTapRef.current = onCharacterTap;
+  });
 
   // Re-apply scale + position from current refs. Re-used on first load
   // and whenever the user tweaks zoom/offset sliders in Settings.
@@ -82,6 +94,8 @@ export default function Live2DCanvas({
         modelRef.current = info;
         applyLayout();
       },
+      overlay,
+      onCharacterTap: () => onCharacterTapRef.current?.(),
     }).then((cleanupFn) => {
       if (disposed) {
         cleanupFn?.();
@@ -99,7 +113,7 @@ export default function Live2DCanvas({
       modelRef.current = null;
       if (cleanup) cleanup();
     };
-  }, [modelUrl, width, height]);
+  }, [modelUrl, width, height, overlay]);
 
   if (failed) return null;
 

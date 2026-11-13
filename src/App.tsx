@@ -78,6 +78,9 @@ function storeOverlayMode(mode: WindowOverlayMode): void {
 export default function App() {
   // ── UI panels ──────────────────────────────────────────────────────
   const [inputOpen, setInputOpen] = useState(true);
+  // Bumped when the avatar stage hands a character tap to the message bar,
+  // so the composer can (re)focus even though it stays mounted.
+  const [inputFocusTick, setInputFocusTick] = useState(0);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [wizardOpen, setWizardOpen] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -519,6 +522,13 @@ export default function App() {
   };
   handleSubmitRef.current = handleSubmit;
 
+  // Avatar-stage character tap (overlay mode): open the message bar and
+  // hand focus to the composer.
+  const handleStageTap = useCallback(() => {
+    setInputOpen(true);
+    setInputFocusTick((n) => n + 1);
+  }, []);
+
   // Generic vision dispatcher: kicks the chat-state machine the same way
   // handleSubmit does, then awaits the chosen invoke. Backend emits the
   // normal `chat:*` event stream so the bubble, route badge, emotion tags,
@@ -580,6 +590,8 @@ export default function App() {
         zoom={settings?.avatar_zoom ?? 1}
         offsetX={settings?.avatar_offset_x ?? 0}
         offsetY={settings?.avatar_offset_y ?? 0}
+        overlayMode={overlayMode === "overlay"}
+        onStageTap={handleStageTap}
       />
       <ChatBubble
         text={bubbleText}
@@ -610,6 +622,7 @@ export default function App() {
       />
       <InputField
         open={inputOpen && !settingsOpen && !wizardOpen}
+        focusTick={inputFocusTick}
         onClose={() => setInputOpen(false)}
         onSubmit={handleSubmit}
         onVisionFull={handleVisionFull}

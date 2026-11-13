@@ -7,7 +7,8 @@ import Live2DCanvas from "./Live2DCanvas";
 /**
  * Avatar stage: renders the Live2D canvas when a model URL is configured
  * (and the Cubism runtime is available), otherwise shows an animated SVG
- * placeholder. Doubles as the window drag handle.
+ * placeholder. Doubles as the window drag handle in windowed mode; in
+ * overlay mode the window is moved through the top bar's grip instead.
  *
  * Tracks window size so the avatar scales responsively when the user
  * resizes the Komorebi window.
@@ -17,11 +18,18 @@ export default function AvatarStage({
   zoom = 1,
   offsetX = 0,
   offsetY = 0,
+  overlayMode = false,
+  onStageTap,
 }: {
   modelUrl: string | null;
   zoom?: number;
   offsetX?: number;
   offsetY?: number;
+  /** Overlay mode: a layer surface cannot be dragged by the client, and a
+   * tap on the character opens the message bar instead of a reaction. */
+  overlayMode?: boolean;
+  /** Overlay-mode character tap: open the message bar. */
+  onStageTap?: () => void;
 }) {
   const [size, setSize] = useState(() => ({
     w: window.innerWidth,
@@ -39,6 +47,9 @@ export default function AvatarStage({
 
   const startDrag = (e: React.PointerEvent) => {
     if (e.button !== 0) return;
+    // Overlay mode is a layer surface: the client cannot move it, and the
+    // top bar's grip leaves the mode before dragging instead.
+    if (overlayMode) return;
     // Defer native window-drag until the pointer actually moves a few
     // pixels. Otherwise even a quick click is consumed by the OS drag
     // loop and the canvas's `pointerup` (tap-to-react / play special
@@ -81,6 +92,7 @@ export default function AvatarStage({
   return (
     <div
       className="interactive"
+      data-avatar-stage
       onPointerDown={startDrag}
       style={{
         position: "absolute",
@@ -103,6 +115,8 @@ export default function AvatarStage({
           zoom={zoom}
           offsetX={offsetX}
           offsetY={offsetY}
+          overlay={overlayMode}
+          onCharacterTap={() => onStageTap?.()}
         />
       ) : (
         <AnimatedPlaceholder />

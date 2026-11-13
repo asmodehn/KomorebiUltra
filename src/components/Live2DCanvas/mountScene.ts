@@ -55,6 +55,11 @@ export interface MountOptions {
   isDisposed: () => boolean;
   /** Called once the Live2D model is ready so the caller can re-layout. */
   onModelReady: (info: ModelInfo) => void;
+  /** Overlay mode: a character tap opens the message bar instead of
+   * playing a random reaction. */
+  overlay?: boolean;
+  /** Overlay-mode character tap hand-off. */
+  onCharacterTap?: () => void;
 }
 
 /**
@@ -68,7 +73,8 @@ export interface MountOptions {
 export async function mountLive2DScene(
   opts: MountOptions,
 ): Promise<(() => void) | null> {
-  const { container, modelUrl, width, height, isDisposed, onModelReady } = opts;
+  const { container, modelUrl, width, height, isDisposed, onModelReady, overlay, onCharacterTap } =
+    opts;
 
   const runtime = detectRuntime(modelUrl);
   const coreReady = await ensureRuntime(runtime);
@@ -342,6 +348,12 @@ export async function mountLive2DScene(
       // held longer than 350 ms, treat it as a drag (AvatarStage is
       // doing its thing) and don't fire a tap.
       if (Math.hypot(dx, dy) > 6 || dt > 350) return;
+      // Overlay mode: the character is a "talk to me" surface — a tap
+      // opens the message bar rather than firing a random reaction.
+      if (overlay) {
+        onCharacterTap?.();
+        return;
+      }
       const r = canvas.getBoundingClientRect();
       // The canvas can be much wider than the model; a tap on empty
       // canvas is not a tap on her. With autoDensity, CSS pixels from

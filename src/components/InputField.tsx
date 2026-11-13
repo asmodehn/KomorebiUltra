@@ -21,6 +21,9 @@ interface Props {
   onImagePrompt?: (prompt: string) => void;
   sttEnabled?: boolean;
   visionEnabled?: boolean;
+  /** Bumped by the avatar stage on overlay-mode character taps so the
+   * composer can (re)focus even while staying mounted. */
+  focusTick?: number;
 }
 
 export default function InputField({
@@ -33,6 +36,7 @@ export default function InputField({
   onImagePrompt,
   sttEnabled = false,
   visionEnabled = false,
+  focusTick = 0,
 }: Props) {
   useLocale();
   const [value, setValue] = useState("");
@@ -55,6 +59,12 @@ export default function InputField({
       setRecording(false);
     }
   }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Character-tap hand-off: when the avatar stage opens the composer via
+  // a focus tick, move focus to the input right away.
+  useEffect(() => {
+    if (open && focusTick > 0) queueMicrotask(() => ref.current?.focus());
+  }, [open, focusTick]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const toggleMic = async () => {
     setMicError(null);
