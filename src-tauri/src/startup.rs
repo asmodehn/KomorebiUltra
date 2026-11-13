@@ -15,10 +15,41 @@ pub(crate) fn run(
     app: &mut tauri::App,
     toggle_input: Shortcut,
     vision_region: Shortcut,
+    overlay: Shortcut,
+    toggle_window: Shortcut,
 ) -> Result<(), Box<dyn std::error::Error>> {
     app.global_shortcut().register(toggle_input)?;
     if let Err(e) = app.global_shortcut().register(vision_region) {
         tracing::warn!(?e, "failed to register Alt+V hotkey");
+    }
+    if let Err(e) = app.global_shortcut().register(overlay) {
+        tracing::warn!(?e, "failed to register Alt+O overlay hotkey");
+    }
+    if let Err(e) = app.global_shortcut().register(toggle_window) {
+        tracing::warn!(?e, "failed to register F11 window toggle hotkey");
+    }
+
+    // The main window is created with `visible: false` so that the overlay's
+    // layer surface can be attached while the widget is still unmapped
+    // (gtk-layer-shell re-creates the GdkWindow and refuses a mapped widget).
+    // It is shown below unless this is a headless run.
+    //
+    // The layer surface is attached *before* the forced mode is applied:
+    // `apply_overlay` needs to know whether the window already is a layer
+    // surface, otherwise it warns about tiling and tries to fill a monitor
+    // that does not exist yet (the window is still unmapped at this point).
+    //
+    // `KOMOREBI_START_MODE` (bug repro / QA) pins the mode over the remembered
+    // choice; the frontend uses the same value to tell a pinned mode apart.
+    if let Some(w) = app.get_webview_window("main") {
+        crate::window::init_layer_shell(&w);
+        if let Some(m) = crate::window::start_mode() {
+            let effective = crate::window::apply_overlay(&w, m);
+            tracing::info!(
+                ?effective,
+                "startup: forced window mode from KOMOREBI_START_MODE"
+            );
+        }
     }
 
     // Phase 1: spawn the feedback-telemetry uploader. Runs even when
@@ -54,6 +85,14 @@ pub(crate) fn run(
     // user when appropriate (only if enabled in settings).
     crate::proactive::spawn(app.handle().clone());
     crate::coach::spawn(app.handle().clone());
+
+    if let Some(w) = app.get_webview_window("main") {
+        // The window starts hidden (see `visible: false` above); a normal run
+        // shows it once the overlay surface is set up.
+        if let Err(e) = w.show() {
+            tracing::warn!(?e, "failed to show the main window");
+        }
+    }
 
     // Local intent classifier: if the user has previously downloaded
     // the embedding model (cache dir exists), warm it up in the

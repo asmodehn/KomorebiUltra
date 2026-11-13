@@ -53,6 +53,7 @@ pub mod tts;
 mod util;
 pub mod vision;
 pub mod weather;
+pub mod window;
 
 // --- Public command facade (consumed by `tauri::generate_handler!`) ------
 
@@ -114,3 +115,4 @@ pub use weather::{
     clear_weather_api_key, get_weather, set_weather_api_key, set_weather_default_city,
     set_weather_provider, set_weather_units, set_weather_use_ip,
 };
+pub use window::{set_window_overlay, window_overlay_info};

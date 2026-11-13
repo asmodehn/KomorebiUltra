@@ -90,6 +90,7 @@ komorebi-intent = { path = "crates/intent" }
 
 [features]
 default = []
+layer-shell = ["dep:gtk-layer-shell"]
 local-llm = ["komorebi-llm/local-llm"]
 stt = ["komorebi-voice/stt"]
 # Convenience umbrella: everything that ships in the full release binary.
@@ -111,6 +112,12 @@ codegen-units = 16
 lto = "thin"
 opt-level = 2
 strip = false
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Wayland layer-shell support (opt-in): install `libgtk-layer-shell-dev`,
+# then build with `--features layer-shell` and launch with
+# `KOMOREBI_LAYER_SHELL=1` so tiling compositors don't tile the window.
+gtk-layer-shell = { version = "0.7", optional = true, features = ["v0_6"] }
 
 # Dev builds: speed up dependency compilation (they dominate first-run
 # cost) while keeping our own crates unoptimized for fast incremental
