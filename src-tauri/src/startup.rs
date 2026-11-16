@@ -86,7 +86,43 @@ pub(crate) fn run(
     crate::proactive::spawn(app.handle().clone());
     crate::coach::spawn(app.handle().clone());
 
-    if let Some(w) = app.get_webview_window("main") {
+    // Dev-only agent harness: window frames + file command channel
+    // (`KOMOREBI_AGENT_DIR`), see `src/agent_frame.rs`.
+    crate::agent_frame::spawn(app.handle().clone());
+
+    // Headless experiments: keep the app (and the frame harness) running with
+    // the window unmapped, so nothing appears on the user's desktop.
+    //
+    // The value is a *mandatory* deadline in seconds. A headless run must never
+    // outlive its experiment: it would keep the single-instance lock, burn CPU
+    // and look "stuck" to the next session. Refusing to start without a
+    // deadline is deliberate.
+    if let Ok(raw) = std::env::var("KOMOREBI_HEADLESS") {
+        let secs: u64 = match raw.trim().parse() {
+            Ok(s) if s > 0 => s,
+            _ => {
+                tracing::error!(
+                    value = %raw,
+                    "KOMOREBI_HEADLESS must be a positive number of seconds, e.g. \
+                     KOMOREBI_HEADLESS=600 (a headless run cannot outlive its deadline)"
+                );
+                std::process::exit(2);
+            }
+        };
+        if let Some(w) = app.get_webview_window("main") {
+            let _ = w.hide();
+            tracing::info!(
+                secs,
+                "headless: main window hidden, exiting at the deadline"
+            );
+        }
+        let handle = app.handle().clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(secs));
+            tracing::warn!(secs, "headless: deadline reached, exiting");
+            handle.exit(0);
+        });
+    } else if let Some(w) = app.get_webview_window("main") {
         // The window starts hidden (see `visible: false` above); a normal run
         // shows it once the overlay surface is set up.
         if let Err(e) = w.show() {

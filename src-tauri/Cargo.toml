@@ -118,6 +118,13 @@ strip = false
 # transitive dependency of Tauri's wry; pinned here to use it directly.
 gtk = "0.18"
 
+# WebKitGTK handle for the window-area frame capture (window/frame.rs).
+webkit2gtk = "2.0"
+
+# `Surface::write_to_png` for the frame capture (png feature is off by
+# default in cairo-rs; the crate is already in the gtk 0.18 tree).
+cairo-rs = { version = "0.18", features = ["png"] }
+
 # Wayland layer-shell support (opt-in): install `libgtk-layer-shell-dev`,
 # then build with `--features layer-shell` and launch with
 # `KOMOREBI_LAYER_SHELL=1` so tiling compositors don't tile the window.

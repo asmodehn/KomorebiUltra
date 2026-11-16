@@ -6,9 +6,18 @@
 //! Linux only for now (X11 and Wayland).
 
 use serde::Deserialize;
+use std::sync::Mutex;
 use tauri::WebviewWindow;
 
 const ENV_VAR: &str = "KOMOREBI_INPUT_REGION";
+
+/// Last OS input region reported by the frontend, for the dev frame harness.
+static LAST_RECTS: Mutex<Vec<(i32, i32, i32, i32)>> = Mutex::new(Vec::new());
+
+/// The last input region as `(x, y, w, h)` tuples (empty = whole window).
+pub fn last_rects() -> Vec<(i32, i32, i32, i32)> {
+    LAST_RECTS.lock().map(|r| r.clone()).unwrap_or_default()
+}
 
 #[derive(Debug, Deserialize)]
 pub struct InputRect {
@@ -23,6 +32,9 @@ pub struct InputRect {
 /// An empty list restores input on the whole window.
 #[tauri::command]
 pub fn set_input_region(window: WebviewWindow, rects: Vec<InputRect>) -> Result<bool, String> {
+    if let Ok(mut slot) = LAST_RECTS.lock() {
+        *slot = rects.iter().map(|r| (r.x, r.y, r.w, r.h)).collect();
+    }
     if std::env::var_os(ENV_VAR).is_none() {
         return Ok(false);
     }

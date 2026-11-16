@@ -118,4 +118,4 @@ pub use weather::{
     clear_weather_api_key, get_weather, set_weather_api_key, set_weather_default_city,
     set_weather_provider, set_weather_units, set_weather_use_ip,
 };
-pub use window::{set_window_overlay, window_overlay_info};
+pub use window::{agent_report, set_window_overlay, window_overlay_info};

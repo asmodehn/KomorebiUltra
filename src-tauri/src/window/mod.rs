@@ -303,3 +303,20 @@ fn platform_apply(_window: &WebviewWindow, mode: OverlayMode) -> OverlayMode {
 
 #[cfg(target_os = "linux")]
 mod linux;
+
+mod frame;
+
+/// PNG of the window area (see `frame.rs`).
+pub fn capture_frame(window: &WebviewWindow) -> Result<Vec<u8>, String> {
+    frame::capture(window)
+}
+
+/// Cycle between the two modes: normal ↔ overlay. `overlay` always means
+/// "frontmost + covering the monitor"; native non-tiling (layer-shell, X11
+/// hints) is best-effort on top of that and does not change the reported mode.
+pub fn toggle(current: OverlayMode) -> OverlayMode {
+    match current {
+        OverlayMode::Normal => OverlayMode::Overlay,
+        OverlayMode::Overlay => OverlayMode::Normal,
+    }
+}

@@ -68,3 +68,10 @@ pub fn window_overlay_info() -> OverlayInfo {
         forced: crate::window::start_mode().is_some(),
     }
 }
+
+/// Dev harness: UI snapshot pushed by the frontend (`src/agentFrame.ts`).
+/// No-op outside debug builds; see `crate::agent_frame`.
+#[tauri::command]
+pub fn agent_report(json: String) {
+    crate::agent_frame::report(json);
+}
