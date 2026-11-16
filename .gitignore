@@ -29,6 +29,7 @@ src-tauri/binaries/piper/*
 .env
 .env.local
 .env.*.local
+.sandbox/
 # Tauri updater signing keys — never commit these
 *.key
 *.key.pub
