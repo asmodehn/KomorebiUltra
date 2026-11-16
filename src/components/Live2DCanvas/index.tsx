@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import { mountLive2DScene, type ModelInfo } from "./mountScene";
 
 /**
@@ -6,9 +6,9 @@ import { mountLive2DScene, type ModelInfo } from "./mountScene";
  * from `modelUrl`.
  *
  * Graceful failure modes:
- *  - Cubism core script missing → returns `null` (parent shows placeholder).
- *  - Model fetch/parse error → returns `null` + console warning.
- *  - PIXI / pixi-live2d-display import error → returns `null`.
+ *  - Cubism core script missing → nothing is mounted (the stage stays empty).
+ *  - Model fetch/parse error → retried with a short backoff, then a warning.
+ *  - PIXI / pixi-live2d-display import error → nothing is mounted.
  */
 export default function Live2DCanvas({
   modelUrl,
@@ -32,7 +32,6 @@ export default function Live2DCanvas({
   onCharacterTap?: () => void;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const [failed, setFailed] = useState(false);
   // Live layout refs — let the user tweak avatar zoom/position without
   // tearing down the whole PIXI app + Live2D model.
   const modelRef = useRef<ModelInfo | null>(null);
@@ -86,38 +85,67 @@ export default function Live2DCanvas({
     const container = containerRef.current;
     if (!container) return;
 
-    void mountLive2DScene({
-      container,
-      modelUrl,
-      width,
-      height,
-      isDisposed: () => disposed,
-      onModelReady: (info) => {
-        modelRef.current = info;
-        applyLayout();
-      },
-      overlay,
-      onCharacterTap: () => onCharacterTapRef.current?.(),
-    }).then((cleanupFn) => {
-      if (disposed) {
-        cleanupFn?.();
-        return;
+    // A mount right after the window was recreated can lose its first asset
+    // requests: the webview's network process is still coming up while the
+    // page fires its first XHRs, and WebKit reports them as `Status 0`
+    // ("Load failed"). Give the load a few attempts with a short backoff
+    // instead of leaving the stage empty for the whole session.
+    const ATTEMPTS = 4;
+    const RETRY_MS = 250;
+
+    void (async () => {
+      for (let attempt = 0; attempt < ATTEMPTS; attempt++) {
+        let cleanupFn: (() => void) | null = null;
+        try {
+          cleanupFn = await mountLive2DScene({
+            container,
+            modelUrl,
+            width,
+            height,
+            isDisposed: () => disposed,
+            onModelReady: (info) => {
+              modelRef.current = info;
+              applyLayout();
+            },
+            overlay,
+            onCharacterTap: () => onCharacterTapRef.current?.(),
+          });
+        } catch (err) {
+          // A rejected import/fetch is just another failed attempt.
+          console.warn(`[Live2D] mount attempt ${attempt + 1} threw:`, err);
+        }
+        if (disposed) {
+          cleanupFn?.();
+          return;
+        }
+        if (cleanupFn) {
+          cleanup = cleanupFn;
+          // Status for the dev harness: tells "the model is mounted" apart
+          // from "an empty canvas exists" (the PIXI app is created before the
+          // model finishes loading). `modelReadyAt` is ms since the page
+          // started, so a window switch can be measured end to end.
+          container.dataset.modelReady = "1";
+          container.dataset.modelReadyAt = String(Math.round(performance.now()));
+          return;
+        }
+        console.warn(
+          `[Live2D] mount attempt ${attempt + 1}/${ATTEMPTS} failed`,
+        );
+        if (attempt + 1 < ATTEMPTS) {
+          await new Promise((r) => window.setTimeout(r, RETRY_MS * (attempt + 1)));
+          if (disposed) return;
+        }
       }
-      if (cleanupFn) {
-        cleanup = cleanupFn;
-      } else {
-        setFailed(true);
-      }
-    });
+    })();
 
     return () => {
       disposed = true;
       modelRef.current = null;
+      delete container.dataset.modelReady;
+      delete container.dataset.modelReadyAt;
       if (cleanup) cleanup();
     };
   }, [modelUrl, width, height, overlay]);
-
-  if (failed) return null;
 
   return (
     <div

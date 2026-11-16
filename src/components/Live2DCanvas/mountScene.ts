@@ -85,6 +85,11 @@ export async function mountLive2DScene(
     return null;
   }
 
+  // Created PIXI app, tracked outside the `try` so a fatal load error can
+  // release its canvas/GL context instead of leaving a blank canvas (and a
+  // leaked WebGL context) behind for a retry.
+  let createdApp: { destroy: (...args: unknown[]) => void } | null = null;
+
   try {
     const PIXI = await import("pixi.js");
     patchPixiUtilsUrl(PIXI);
@@ -110,6 +115,7 @@ export async function mountLive2DScene(
       autoDensity: true,
       resolution: window.devicePixelRatio || 1,
     });
+    createdApp = app as unknown as { destroy: (...args: unknown[]) => void };
     container.appendChild(app.view as unknown as Node);
 
     const model = await Live2DModel.from(modelUrl, {
@@ -415,6 +421,14 @@ export async function mountLive2DScene(
     };
   } catch (err) {
     console.warn("[Live2D] failed to initialize:", err);
+    // Release the half-built scene so the caller can retry into a clean
+    // container: without this the failed canvas stays mounted and every retry
+    // would stack another WebGL context on it.
+    try {
+      createdApp?.destroy(true, { children: true, texture: true, baseTexture: true });
+    } catch {
+      /* ignore */
+    }
     return null;
   }
 }
