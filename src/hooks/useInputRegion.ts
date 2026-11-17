@@ -68,7 +68,13 @@ export function useInputRegion(mode: WindowOverlayMode): void {
         .then((on) => {
           if (!on) stop();
         })
-        .catch(() => stop());
+        .catch(() => {
+          // A rejected send (window just recreated, main thread busy) is
+          // transient, so keep reporting. Stopping here would leave the last
+          // applied region in place while the UI moves under it, and clicks on
+          // the parts that moved would fall through to the desktop.
+          last = "";
+        });
     };
     const timer = window.setInterval(report, INTERVAL_MS);
     window.addEventListener("resize", report);
