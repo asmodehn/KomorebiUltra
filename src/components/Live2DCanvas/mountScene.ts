@@ -23,9 +23,13 @@ export interface ModelInfo {
     scale: { set: (s: number) => void };
     x: number;
     y: number;
-    width: number;
-    height: number;
   };
+  /** The model's size in its own units, before any scale. Deliberately not
+   * `model.width`/`model.height`: those are `scale * localBounds`
+   * (PIXI `Container`), so they change with the scale you are trying to
+   * compute. */
+  modelW: number;
+  modelH: number;
   anchored: boolean;
   canvasW: number;
   canvasH: number;
@@ -44,6 +48,25 @@ let modelRectProbe: (() => DOMRect) | null = null;
 /** Client rect of the mounted model, or null when none is mounted. */
 export function modelClientRect(): DOMRect | null {
   return modelRectProbe ? modelRectProbe() : null;
+}
+
+/**
+ * The model's size in its own units, before any scale is applied. Never use
+ * the PIXI container's `width`/`height` for this: those are
+ * `scale * localBounds`, so a fit derived from them shrinks and grows with the
+ * scale it is trying to compute.
+ */
+function modelSize(model: unknown): { w: number; h: number } {
+  const internal = (
+    model as { internalModel?: { width?: number; height?: number } }
+  ).internalModel;
+  if (internal?.width && internal?.height) {
+    return { w: internal.width, h: internal.height };
+  }
+  const bounds = (
+    model as { getLocalBounds?: () => { width: number; height: number } }
+  ).getLocalBounds?.();
+  return { w: bounds?.width || 0, h: bounds?.height || 0 };
 }
 
 export interface MountOptions {
@@ -143,8 +166,16 @@ export async function mountLive2DScene(
       /* some builds expose anchor on the internal sprite only */
     }
 
+    // Size of the model in its own units. `internalModel.width/height` is the
+    // layout canvas, and it is the value the library itself pivots on
+    // (`onAnchorChange`), so centring with it stays exact; the local bounds are
+    // the fallback for a build that does not expose it.
+    const { w: modelW, h: modelH } = modelSize(model);
+
     onModelReady({
       model: model as unknown as ModelInfo["model"],
+      modelW,
+      modelH,
       anchored,
       canvasW: width,
       canvasH: height,
@@ -324,6 +355,16 @@ export async function mountLive2DScene(
     // event to bubble so AvatarStage's window drag handler still fires.
     const canvas = app.view as HTMLCanvasElement;
     canvas.style.pointerEvents = "auto";
+    // PIXI's EventSystem owns `style.cursor` once it is running: with nothing
+    // interactive under the pointer it resets the canvas to its `default`
+    // cursor style ("inherit" — pixi.js `EventSystem`, cursorStyles), which
+    // silently undoes an assignment here. Set the style it resets to.
+    const events = (
+      app.renderer as unknown as {
+        events?: { cursorStyles?: Record<string, string> };
+      }
+    ).events;
+    if (events?.cursorStyles) events.cursorStyles.default = "grab";
     canvas.style.cursor = "grab";
     // Model bounds in stage coordinates, which with autoDensity are CSS
     // pixels from the canvas corner.
@@ -354,16 +395,12 @@ export async function mountLive2DScene(
       // held longer than 350 ms, treat it as a drag (AvatarStage is
       // doing its thing) and don't fire a tap.
       if (Math.hypot(dx, dy) > 6 || dt > 350) return;
-      // Overlay mode: the character is a "talk to me" surface — a tap
-      // opens the message bar rather than firing a random reaction.
-      if (overlay) {
-        onCharacterTap?.();
-        return;
-      }
       const r = canvas.getBoundingClientRect();
       // The canvas can be much wider than the model; a tap on empty
       // canvas is not a tap on her. With autoDensity, CSS pixels from
-      // the canvas corner are stage coordinates.
+      // the canvas corner are stage coordinates. Checked before the
+      // overlay branch so a tap on the empty desktop area of the
+      // overlay window does not open the message bar.
       if (!modelBounds().contains(e.clientX - r.left, e.clientY - r.top)) return;
       const ny = (e.clientY - r.top) / r.height;
       // Three vertical zones — the lower third of the avatar covers
@@ -391,6 +428,11 @@ export async function mountLive2DScene(
       // generates the line via LLM (mode-aware, multilingual) and
       // falls back to canned localized strings on timeout.
       invoke("speak_reaction", { zone }).catch(() => {});
+      // Overlay mode: the character is also the "talk to me" surface, so
+      // the same tap opens the message bar. It does so in addition to the
+      // reaction above: a tap that only opened a text box read as a dead
+      // click, because she never answered it.
+      if (overlay) onCharacterTap?.();
     };
     canvas.addEventListener("pointerdown", onPointerDown);
     canvas.addEventListener("pointerup", onPointerUp);

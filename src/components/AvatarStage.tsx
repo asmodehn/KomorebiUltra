@@ -153,6 +153,10 @@ export default function AvatarStage({
           width={W}
           height={H}
           zoom={zoom}
+          // In the fullscreen overlay she is furniture on the desktop, not
+          // the window's content: a third of the screen, leaving the rest to
+          // the desktop she stands on.
+          fitFraction={overlayMode ? 1 / 3 : 0.9}
           offsetX={offset.x}
           offsetY={offset.y}
           overlay={overlayMode}

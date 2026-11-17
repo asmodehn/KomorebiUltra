@@ -18,6 +18,7 @@ export default function Live2DCanvas({
   offsetX = 0,
   offsetY = 0,
   overlay = false,
+  fitFraction = 0.9,
   onCharacterTap,
 }: {
   modelUrl: string;
@@ -26,6 +27,9 @@ export default function Live2DCanvas({
   zoom?: number;
   offsetX?: number;
   offsetY?: number;
+  /** Fraction of the canvas box the model occupies in its limiting
+   * dimension, before `zoom`. */
+  fitFraction?: number;
   /** Overlay mode: taps on the character open the message bar instead of
    * firing a random reaction. */
   overlay?: boolean;
@@ -36,6 +40,7 @@ export default function Live2DCanvas({
   // tearing down the whole PIXI app + Live2D model.
   const modelRef = useRef<ModelInfo | null>(null);
   const zoomRef = useRef(zoom);
+  const fitFractionRef = useRef(fitFraction);
   const offsetXRef = useRef(offsetX);
   const offsetYRef = useRef(offsetY);
   // Overlay-mode tap hand-off. Kept in a ref so the mount effect does not
@@ -50,20 +55,24 @@ export default function Live2DCanvas({
   const applyLayout = () => {
     const ref = modelRef.current;
     if (!ref) return;
-    const { model, anchored, canvasW, canvasH } = ref;
-    const fit = Math.min(canvasW / model.width, canvasH / model.height) * 0.9;
+    const { model, modelW, modelH, anchored, canvasW, canvasH } = ref;
+    // Fit from the scale-free size. `model.width`/`height` are
+    // `scale * localBounds` (PIXI `Container`), so a fit derived from them is
+    // inversely proportional to the applied scale: successive calls alternate
+    // between two sizes instead of settling. That is the scale flip seen while
+    // dragging, when this runs on every pointermove.
+    if (!(modelW > 0) || !(modelH > 0)) return;
+    const fit =
+      Math.min(canvasW / modelW, canvasH / modelH) * fitFractionRef.current;
     const scale = fit * Math.max(0.1, zoomRef.current);
-    // Only write the transform when it actually changed. During a character
-    // drag every pointermove re-runs this (via the offset effect) and
-    // redundant transform writes produced transient "character zoomed in"
-    // frames mid-drag before settling.
+    // Only write the transform when it actually changed.
     const sp = model.scale as unknown as { x: number; set: (s: number) => void };
     if (sp.x !== scale) sp.set(scale);
     // Offsets are fractions of the canvas box: ±1.0 = ±half the box.
     const cx = canvasW / 2 + offsetXRef.current * (canvasW / 2);
     const cy = canvasH / 2 + offsetYRef.current * (canvasH / 2);
-    const px = anchored ? cx : cx - (model.width * scale) / 2;
-    const py = anchored ? cy : cy - (model.height * scale) / 2;
+    const px = anchored ? cx : cx - (modelW * scale) / 2;
+    const py = anchored ? cy : cy - (modelH * scale) / 2;
     if (model.x !== px) model.x = px;
     if (model.y !== py) model.y = py;
   };
@@ -71,12 +80,13 @@ export default function Live2DCanvas({
   // Push prop updates into refs and re-layout live.
   useEffect(() => {
     zoomRef.current = zoom;
+    fitFractionRef.current = fitFraction;
     offsetXRef.current = offsetX;
     offsetYRef.current = offsetY;
     applyLayout();
     // applyLayout is stable (closes over refs only).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [zoom, offsetX, offsetY]);
+  }, [zoom, fitFraction, offsetX, offsetY]);
 
   useEffect(() => {
     let disposed = false;
