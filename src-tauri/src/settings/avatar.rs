@@ -6,10 +6,14 @@
 //! is the whole point of letting the user keep the model big inside a
 //! smaller window).
 //!
-//! `avatar_offset_x` / `avatar_offset_y` are *fractions* of the avatar
-//! box (-1.0..=1.0) rather than absolute pixels, so they survive
+//! `avatar_offset_x` / `avatar_offset_y` are *fractions* of half the avatar
+//! box (-2.0..=2.0) rather than absolute pixels, so they survive
 //! window resizes without re-anchoring weirdly. Positive Y nudges the
-//! model down.
+//! model down. ±1 puts the model's centre on the box edge, so half of it is
+//! outside and the window clips it; ±2 puts the centre half a box past the
+//! edge, far enough that the character is drawn clear off the window side at
+//! ordinary sizes. Past ±2 there is nothing left to see, and the drag would
+//! only accumulate distance to travel back.
 
 use super::store::{get_f64, read_string, write_optional_f64, write_optional_string};
 use super::Result;
@@ -46,11 +50,11 @@ pub fn set_avatar_zoom<R: Runtime>(app: &AppHandle<R>, value: f64) -> Result<()>
 }
 
 pub fn set_avatar_offset_x<R: Runtime>(app: &AppHandle<R>, value: f64) -> Result<()> {
-    let clamped = value.clamp(-1.0, 1.0);
+    let clamped = value.clamp(-2.0, 2.0);
     write_optional_f64(app, KEY_AVATAR_OFFSET_X, Some(clamped))
 }
 
 pub fn set_avatar_offset_y<R: Runtime>(app: &AppHandle<R>, value: f64) -> Result<()> {
-    let clamped = value.clamp(-1.0, 1.0);
+    let clamped = value.clamp(-2.0, 2.0);
     write_optional_f64(app, KEY_AVATAR_OFFSET_Y, Some(clamped))
 }

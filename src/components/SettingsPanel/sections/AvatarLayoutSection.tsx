@@ -65,8 +65,8 @@ export default function AvatarLayoutSection({ settings, refresh }: Props) {
         label={t("settings.avatar.offset_x", {
           value: `${ox >= 0 ? "+" : ""}${ox.toFixed(2)}`,
         })}
-        min={-1}
-        max={1}
+        min={-2}
+        max={2}
         step={0.02}
         value={ox}
         onChange={(v) => {
@@ -79,8 +79,8 @@ export default function AvatarLayoutSection({ settings, refresh }: Props) {
         label={t("settings.avatar.offset_y", {
           value: `${oy >= 0 ? "+" : ""}${oy.toFixed(2)}`,
         })}
-        min={-1}
-        max={1}
+        min={-2}
+        max={2}
         step={0.02}
         value={oy}
         onChange={(v) => {

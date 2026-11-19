@@ -4,6 +4,13 @@ import AnimatedPlaceholder from "./AnimatedPlaceholder";
 import Live2DCanvas from "./Live2DCanvas";
 import { modelClientRect } from "./Live2DCanvas/mountScene";
 
+// The stored offset is a fraction of half the stage: ±1 puts her centre on the
+// window edge, so half of her is clipped; ±2 puts it half a stage past the edge
+// and draws her clear off the window side. Beyond ±2 there is nothing left to
+// see, so the range stops there. Hanging out of the window, and out of sight,
+// is the point of it, not a defect.
+const clampOffset = (v: number) => Math.min(2, Math.max(-2, v));
+
 /**
  * Avatar stage: renders the Live2D canvas when a model URL is configured
  * (and the Cubism runtime is available), otherwise shows an animated SVG
@@ -89,8 +96,8 @@ export default function AvatarStage({
     if (!d) return;
     const dx = e.clientX - d.x0;
     const dy = e.clientY - d.y0;
-    const nx = d.ox + (W > 0 ? dx / (W / 2) : 0);
-    const ny = d.oy + (H > 0 ? dy / (H / 2) : 0);
+    const nx = clampOffset(d.ox + (W > 0 ? dx / (W / 2) : 0));
+    const ny = clampOffset(d.oy + (H > 0 ? dy / (H / 2) : 0));
     setOffset((o) => (o.x === nx && o.y === ny ? o : { x: nx, y: ny }));
   };
 
@@ -102,8 +109,8 @@ export default function AvatarStage({
     const dy = e.clientY - d.y0;
     const dt = performance.now() - d.t;
     const isTap = Math.hypot(dx, dy) <= 6 && dt <= 350;
-    const nx = d.ox + (W > 0 ? dx / (W / 2) : 0);
-    const ny = d.oy + (H > 0 ? dy / (H / 2) : 0);
+    const nx = clampOffset(d.ox + (W > 0 ? dx / (W / 2) : 0));
+    const ny = clampOffset(d.oy + (H > 0 ? dy / (H / 2) : 0));
     if (isTap) {
       // Tap: the canvas' gated handler owns the reaction/input hand-off.
       return;
