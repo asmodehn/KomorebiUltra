@@ -3,8 +3,6 @@ import { invoke } from "@tauri-apps/api/core";
 export interface WindowOverlayInfo {
   supported: boolean;
   mode: WindowOverlayMode;
-  /** The mode was pinned by KOMOREBI_START_MODE (explicit launch). */
-  forced: boolean;
 }
 
 export type WindowOverlayMode = "normal" | "overlay";

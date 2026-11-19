@@ -22,10 +22,11 @@
 //!    and the compositor may still tile the window (a compositor-side float
 //!    rule is the no-code workaround).
 //!
-//! The layer-shell path is opt-in: enable the `layer-shell` feature and launch
-//! with `KOMOREBI_LAYER_SHELL=1`. It must attach while the window is not yet
-//! mapped, which is why `tauri.conf.json` creates the window with
-//! `visible: false` and `startup` shows it after `init_layer_shell`. Because a
+//! The layer-shell path needs the `layer-shell` feature; in a Wayland run the
+//! `overlay` mode is then realized as a layer surface, `normal` as a toplevel.
+//! It must attach while the window is not yet mapped, which is why
+//! `tauri.conf.json` creates the window with `visible: false` and `startup`
+//! applies the mode before showing it. Because a
 //! GTK window cannot be detached from the layer shell, a run started this way
 //! stays a layer surface until it exits: once a layer surface is attached it
 //! covers the screen for the process lifetime, so a later `normal` can only
@@ -68,26 +69,11 @@ pub(super) fn overlay_supported() -> bool {
     true
 }
 
-/// `KOMOREBI_LAYER_SHELL` accepts the usual truthy spellings; `0`/`false`
-/// explicitly opt out (a windowed start passes `0`).
-fn layer_shell_requested() -> bool {
-    match std::env::var("KOMOREBI_LAYER_SHELL") {
-        Ok(v) => !matches!(v.as_str(), "" | "0" | "false" | "no" | "off"),
-        Err(_) => false,
-    }
-}
-
-/// Startup: attach the layer surface when the environment asks for it.
-/// Called from `setup` before the window is first mapped.
-pub(super) fn init_layer_shell(window: &WebviewWindow) {
-    set_layer_shell(window, layer_shell_requested());
-}
-
 /// Attach (or explicitly do not attach) the layer surface to `window`.
 ///
-/// Must run while the widget is not mapped. Used both at startup (env-driven)
-/// and when a mode switch recreates the window (mode-driven), so the state
-/// flag always describes the *current* window.
+/// Must run while the widget is not mapped. Used at startup and when a mode
+/// switch recreates the window, so the state flag always describes the
+/// *current* window.
 pub(super) fn set_layer_shell(window: &WebviewWindow, attach_layer: bool) {
     if !attach_layer {
         LAYER_SHELL.store(false, Ordering::Relaxed);

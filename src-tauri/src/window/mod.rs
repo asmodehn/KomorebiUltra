@@ -60,6 +60,26 @@ pub enum OverlayMode {
     Overlay,
 }
 
+impl OverlayMode {
+    /// Name used in the settings store and in `KOMOREBI_START_MODE`.
+    pub fn name(self) -> &'static str {
+        match self {
+            OverlayMode::Normal => "normal",
+            OverlayMode::Overlay => "overlay",
+        }
+    }
+
+    /// Parse a stored name. `always_on_top` is the retired label for the
+    /// overlay: it never covered the monitor, so it is folded into it.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "overlay" | "always_on_top" => Some(OverlayMode::Overlay),
+            "normal" => Some(OverlayMode::Normal),
+            _ => None,
+        }
+    }
+}
+
 /// Platform capability probe.
 #[cfg(target_os = "linux")]
 pub fn overlay_supported() -> bool {
@@ -162,18 +182,10 @@ fn layer_shell_active() -> bool {
     false
 }
 
-/// One-time window setup that must happen before the window is first mapped
-/// (`startup` calls it right after the app is built). Attaches the layer
-/// surface when `KOMOREBI_LAYER_SHELL` asks for it.
-pub fn init_layer_shell(window: &WebviewWindow) {
-    #[cfg(target_os = "linux")]
-    linux::init_layer_shell(window);
-    #[cfg(not(target_os = "linux"))]
-    let _ = window;
-}
-
-/// Explicit variant used when recreating the window for a mode change: the
-/// requested mode, not the (startup-time) environment, decides the window type.
+/// One-time window setup that must happen before the window is first mapped:
+/// the mode decides the window type. Called by `startup` before the window is
+/// shown and by the recreation after a mode change, so the layer-surface flag
+/// always describes the current window.
 pub fn init_layer_shell_for(window: &WebviewWindow, mode: OverlayMode) {
     #[cfg(target_os = "linux")]
     linux::set_layer_shell(
@@ -214,14 +226,10 @@ pub fn needs_recreate(_mode: OverlayMode) -> bool {
 /// folded into `overlay`: it was never a mode of its own.
 pub fn start_mode() -> Option<OverlayMode> {
     let raw = std::env::var("KOMOREBI_START_MODE").ok()?;
-    match raw.as_str() {
-        "overlay" | "always_on_top" => Some(OverlayMode::Overlay),
-        "normal" => Some(OverlayMode::Normal),
-        other => {
-            tracing::warn!(mode = other, "unknown KOMOREBI_START_MODE, ignoring");
-            None
-        }
-    }
+    OverlayMode::from_name(&raw).or_else(|| {
+        tracing::warn!(mode = %raw, "unknown KOMOREBI_START_MODE, ignoring");
+        None
+    })
 }
 
 /// Record the mode a replacement window should be created in. Set before the

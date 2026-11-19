@@ -4,7 +4,7 @@
 //! (Wayland layer-shell, X11 hints, future Windows/macOS backends).
 
 use serde::{Deserialize, Serialize};
-use tauri::{Manager, WebviewWindow};
+use tauri::{AppHandle, Manager, WebviewWindow, Wry};
 
 use crate::window::{
     apply_overlay, finish_switch, needs_recreate, overlay_supported, request_switch, OverlayMode,
@@ -16,10 +16,6 @@ use crate::window::{
 pub struct OverlayInfo {
     pub supported: bool,
     pub mode: OverlayMode,
-    /// True when the mode was pinned by `KOMOREBI_START_MODE` (an explicit
-    /// launch): the frontend must not override it with the remembered
-    /// `localStorage` value.
-    pub forced: bool,
 }
 
 /// Apply `mode`, replacing the window when the window *type* has to change.
@@ -56,8 +52,22 @@ pub(crate) fn switch_mode(window: &WebviewWindow, mode: OverlayMode) -> OverlayM
 }
 
 #[tauri::command]
-pub fn set_window_overlay(window: WebviewWindow, mode: OverlayMode) -> OverlayMode {
-    switch_mode(&window, mode)
+pub fn set_window_overlay(
+    app: AppHandle<Wry>,
+    window: WebviewWindow,
+    mode: OverlayMode,
+) -> OverlayMode {
+    // Stored before the window changes: a window-type switch destroys this
+    // window and reloads the page, so the next launch must find the choice in
+    // the settings store, where `startup` reads it before mapping the window.
+    // A platform that cannot honour the choice (the mode is downgraded) stores
+    // what is actually in effect instead.
+    let _ = crate::settings::set_overlay_mode(&app, mode.name());
+    let effective = switch_mode(&window, mode);
+    if effective != mode {
+        let _ = crate::settings::set_overlay_mode(&app, effective.name());
+    }
+    effective
 }
 
 #[tauri::command]
@@ -65,7 +75,6 @@ pub fn window_overlay_info() -> OverlayInfo {
     OverlayInfo {
         supported: overlay_supported(),
         mode: crate::window::current_mode(),
-        forced: crate::window::start_mode().is_some(),
     }
 }
 

@@ -45,36 +45,6 @@ import { useRelationship } from "./hooks/useRelationship";
 import { useListenController } from "./hooks/useListenController";
 import { useInputRegion } from "./hooks/useInputRegion";
 
-const OVERLAY_STORAGE_KEY = "komorebi.overlay_mode";
-
-/**
- * Overlay is the product default: a transparent, frontmost layer covering
- * the monitor. The choice is remembered so an explicit "normal" survives a
- * restart instead of the startup effect forcing overlay every launch.
- */
-function readStoredOverlayMode(): WindowOverlayMode {
-  try {
-    const v = localStorage.getItem(OVERLAY_STORAGE_KEY);
-    // Only two modes exist: the monitor-covering overlay and a windowed
-    // window. `always_on_top` was an early label for "frontmost without the
-    // overlay treatment" — it never covered the monitor, so it is retired
-    // into `overlay`.
-    if (v === "normal" || v === "overlay") return v;
-    if (v === "always_on_top") return "overlay";
-  } catch {
-    /* storage unavailable (private mode, etc.) — use the default */
-  }
-  return "overlay";
-}
-
-function storeOverlayMode(mode: WindowOverlayMode): void {
-  try {
-    localStorage.setItem(OVERLAY_STORAGE_KEY, mode);
-  } catch {
-    /* best effort: the mode still applies for this session */
-  }
-}
-
 export default function App() {
   // ── UI panels ──────────────────────────────────────────────────────
   const [inputOpen, setInputOpen] = useState(true);
@@ -199,7 +169,10 @@ export default function App() {
   }, []);
 
   // ── Overlay mode: frontmost, covering the monitor ──────────────────────
-  const [overlayMode, setOverlayMode] = useState<WindowOverlayMode>(readStoredOverlayMode);
+  // Overlay is the product default. The backend applies the remembered choice
+  // (or the pinned one) before it maps the window, so this is only the value
+  // for the first frames; the effect below adopts the effective mode.
+  const [overlayMode, setOverlayMode] = useState<WindowOverlayMode>("overlay");
   // The window the page is running in is not necessarily the mode this launch
   // wants until the sync below has run (a switch recreates the window and
   // reloads the page). Placement of the character measures the stage, so it
@@ -207,11 +180,10 @@ export default function App() {
   const [modeSettled, setModeSettled] = useState(false);
   useInputRegion(overlayMode);
 
-  /** Single place that changes the mode: keeps the window, the state and
-   * the remembered choice in sync. */
+  /** Single place that changes the mode in the page; the backend stores the
+   * choice when the mode is applied, so a relaunch reopens in it. */
   const changeOverlayMode = useCallback((next: WindowOverlayMode) => {
     setOverlayMode(next);
-    storeOverlayMode(next);
   }, []);
 
   /** Apply a requested overlay/windowed mode through the backend and sync
@@ -219,10 +191,9 @@ export default function App() {
    * handlers so both paths run the exact same two-mode logic (and surface
    * backend failures instead of silently leaving stale state behind).
    *
-   * The choice is persisted *before* the backend call: a window-type change
-   * recreates the webview in-process, so the page reloads. If the write
-   * landed after the reload the fresh page would read the old mode and
-   * immediately switch back. */
+   * The backend stores the choice before it replaces the window: a
+   * window-type change recreates the webview in-process, so the page reloads,
+   * and the next launch must reopen in the mode that was asked for. */
   const applyRequestedMode = useCallback(
     async (next: WindowOverlayMode) => {
       changeOverlayMode(next);
@@ -310,18 +281,13 @@ export default function App() {
         setModeSettled(true);
         return;
       }
-      // A pinned KOMOREBI_START_MODE wins; otherwise use the remembered
-      // choice. Two modes only: normal (windowed) vs overlay.
-      // If the backend is not already in that mode (e.g. a plain dev start
-      // with a remembered overlay), request it: changing the window type
-      // recreates the window in-process, which `applyRequestedMode` handles.
-      const next: WindowOverlayMode = info.forced
-        ? info.mode
-        : readStoredOverlayMode();
-      if (!mounted) return;
-      if (next !== info.mode) await applyRequestedMode(next);
-      else changeOverlayMode(next);
-      if (mounted) setModeSettled(true);
+      // The backend has already applied the launch's mode (pinned or
+      // remembered) before the window was mapped, so the page adopts it
+      // instead of requesting a switch: asking here would mean destroying a
+      // window that is already correct, which the user sees as a flash and
+      // loses the keyboard focus to.
+      changeOverlayMode(info.mode);
+      setModeSettled(true);
     })().catch(() => {
       /* window mode is cosmetic: keep the in-page state on failure */
       if (mounted) setModeSettled(true);
@@ -329,7 +295,7 @@ export default function App() {
     return () => {
       mounted = false;
     };
-  }, [applyRequestedMode, changeOverlayMode]);
+  }, [changeOverlayMode]);
 
   useChatStream({
     activeIdRef,
