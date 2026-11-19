@@ -1,5 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import { setAvatarOffset } from "../api";
+import {
+  avatarCornerPending,
+  markAvatarCornerDone,
+  setAvatarOffset,
+} from "../api";
 import AnimatedPlaceholder from "./AnimatedPlaceholder";
 import Live2DCanvas from "./Live2DCanvas";
 import { modelClientRect } from "./Live2DCanvas/mountScene";
@@ -10,6 +14,10 @@ import { modelClientRect } from "./Live2DCanvas/mountScene";
 // see, so the range stops there. Hanging out of the window, and out of sight,
 // is the point of it, not a defect.
 const clampOffset = (v: number) => Math.min(2, Math.max(-2, v));
+
+/** Gap between her and the stage's right and bottom edges when she is
+ * placed in the corner (the stage is inset from the window horizontally). */
+const CORNER_MARGIN = 8;
 
 /**
  * Avatar stage: renders the Live2D canvas when a model URL is configured
@@ -26,6 +34,8 @@ export default function AvatarStage({
   offsetX = 0,
   offsetY = 0,
   overlayMode = false,
+  placementReady = false,
+  onPositionSaved,
   onStageTap,
 }: {
   modelUrl: string | null;
@@ -35,6 +45,13 @@ export default function AvatarStage({
   /** Character move handle in both modes; empty-stage grabs are
    * click-through (overlay) / no-ops (windowed). */
   overlayMode?: boolean;
+  /** True once the window mode and the stored settings have both settled:
+   * the launch placement measures the stage, so it must not run against the
+   * throwaway window the page boots in (see the effect below). */
+  placementReady?: boolean;
+  /** Called after a placement was persisted, so the settings panel re-reads
+   * the offset it now holds instead of showing the previous launch's. */
+  onPositionSaved?: () => void;
   /** Overlay-mode character tap: open the message bar. */
   onStageTap?: () => void;
 }) {
@@ -64,6 +81,104 @@ export default function AvatarStage({
     ox: number;
     oy: number;
   } | null>(null);
+
+  const stageRef = useRef<HTMLDivElement>(null);
+  const offsetRef = useRef(offset);
+  useEffect(() => {
+    offsetRef.current = offset;
+  }, [offset]);
+
+  // Until she can walk to where you are, every launch puts her back in the
+  // lower-right corner: a place you can find her, rather than wherever the
+  // last drag left her (possibly off the window, and forgotten).
+  // The corner is measured from her drawn bounds, not assumed: the model is
+  // not a fixed shape, and the offset is a fraction of half the stage, so the
+  // shift that lands her in the corner depends on her size and the window's.
+  // It runs once per launch, after the stage and the stored offset have
+  // settled, and the launch state is the backend's: a window-type switch
+  // reloads the page inside the same process and must keep a drag. Measured
+  // once only: after a resize the 8 px gap is no longer exact, and re-running
+  // it would fight a drag, which is fine — she may sit anywhere.
+  const cornered = useRef(false);
+  useEffect(() => {
+    if (!modelUrl || !placementReady) return;
+    const stage = stageRef.current;
+    if (!stage) return;
+    let cancelled = false;
+    const deadline = performance.now() + 30000;
+    let raf = 0;
+    const save = async (x: number, y: number) => {
+      try {
+        await setAvatarOffset(x, y);
+      } catch {
+        // Leave the launch pending: a later page of it retries the placement
+        // and the save, where marking it done would keep her behind a store
+        // that never got the value.
+        return;
+      }
+      // Done only once the save landed: the page can be destroyed in between
+      // (a launch is exactly when a window switch is pending), and a launch
+      // recorded as done without the stored value would leave the next page
+      // showing her somewhere the store does not agree with.
+      await markAvatarCornerDone().catch(() => {
+        // Best effort: a later page places her again, which is the same place.
+      });
+      // Re-read the stored settings so the app does not keep the previous
+      // launch's numbers — unless a drag landed while the save was in flight,
+      // in which case those props are already behind.
+      const now = offsetRef.current;
+      if (now.x === x && now.y === y) onPositionSaved?.();
+    };
+    const place = () => {
+      if (cancelled || cornered.current) return;
+      // Out of time (a model that never draws): leave the launch pending, so a
+      // later page places her rather than the position being lost for good.
+      if (performance.now() > deadline) return;
+      const model = stage.querySelector("[data-model-ready]")
+        ? modelClientRect()
+        : null;
+      const box = stage.getBoundingClientRect();
+      // The stage box is sized from a `resize` handler, and a mode switch that
+      // resizes the window in place (no layer shell) updates the window before
+      // that handler runs: measuring now would corner her against the boot
+      // geometry and mark the launch done. Wait for the box to match the window.
+      const liveW = Math.max(220, window.innerWidth - 24);
+      const liveH = Math.max(260, window.innerHeight - 120);
+      const boxStale =
+        Math.abs(box.width - liveW) > 1 || Math.abs(box.height - liveH) > 1;
+      if (
+        !model ||
+        model.width < 1 ||
+        box.width < 1 ||
+        box.height < 1 ||
+        boxStale
+      ) {
+        raf = requestAnimationFrame(place);
+        return;
+      }
+      cornered.current = true;
+      const { x, y } = offsetRef.current;
+      const nx = clampOffset(
+        x + (box.right - CORNER_MARGIN - model.right) / (box.width / 2),
+      );
+      const ny = clampOffset(
+        y + (box.bottom - CORNER_MARGIN - model.bottom) / (box.height / 2),
+      );
+      setOffset({ x: nx, y: ny });
+      void save(nx, ny);
+    };
+    // The launch state is the backend's, so the throwaway first page of a
+    // launch cannot mark it and the page that survives still places her.
+    void avatarCornerPending()
+      .catch(() => false)
+      .then((pending) => {
+        if (!cancelled && pending) raf = requestAnimationFrame(place);
+      });
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(raf);
+    };
+  }, [modelUrl, placementReady, onPositionSaved]);
 
   // ── The character is the move handle in BOTH modes (windowed included):
   // a grab on her nudges the character (avatar nudge, saved on release); a
@@ -132,6 +247,7 @@ export default function AvatarStage({
 
   return (
     <div
+      ref={stageRef}
       className="interactive"
       data-avatar-stage
       onPointerDown={onStagePointerDown}

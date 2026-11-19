@@ -200,6 +200,11 @@ export default function App() {
 
   // ── Overlay mode: frontmost, covering the monitor ──────────────────────
   const [overlayMode, setOverlayMode] = useState<WindowOverlayMode>(readStoredOverlayMode);
+  // The window the page is running in is not necessarily the mode this launch
+  // wants until the sync below has run (a switch recreates the window and
+  // reloads the page). Placement of the character measures the stage, so it
+  // waits for this instead of assuming the boot-time geometry.
+  const [modeSettled, setModeSettled] = useState(false);
   useInputRegion(overlayMode);
 
   /** Single place that changes the mode: keeps the window, the state and
@@ -298,7 +303,13 @@ export default function App() {
     let mounted = true;
     (async () => {
       const info = await getWindowOverlayInfo();
-      if (!mounted || !info.supported) return;
+      if (!mounted) return;
+      if (!info.supported) {
+        // No overlay support: the window never changes shape, so the stage is
+        // already final and placement may proceed.
+        setModeSettled(true);
+        return;
+      }
       // A pinned KOMOREBI_START_MODE wins; otherwise use the remembered
       // choice. Two modes only: normal (windowed) vs overlay.
       // If the backend is not already in that mode (e.g. a plain dev start
@@ -310,8 +321,10 @@ export default function App() {
       if (!mounted) return;
       if (next !== info.mode) await applyRequestedMode(next);
       else changeOverlayMode(next);
+      if (mounted) setModeSettled(true);
     })().catch(() => {
       /* window mode is cosmetic: keep the in-page state on failure */
+      if (mounted) setModeSettled(true);
     });
     return () => {
       mounted = false;
@@ -591,6 +604,8 @@ export default function App() {
         offsetX={settings?.avatar_offset_x ?? 0}
         offsetY={settings?.avatar_offset_y ?? 0}
         overlayMode={overlayMode === "overlay"}
+        placementReady={modeSettled && settings !== null}
+        onPositionSaved={refreshSettings}
         onStageTap={handleStageTap}
       />
       <ChatBubble

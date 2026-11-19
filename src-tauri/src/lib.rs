@@ -1,6 +1,7 @@
 //! Komorebi desktop entrypoint.
 
 mod agent_frame;
+mod boot;
 mod chat;
 mod coach;
 mod commands;
@@ -193,6 +194,8 @@ pub fn run() {
             commands::avatar::set_avatar_zoom,
             commands::avatar::set_avatar_offset,
             commands::avatar::set_live2d_model,
+            crate::boot::avatar_corner_pending,
+            crate::boot::avatar_corner_done,
             commands::overlay::set_input_region,
             commands::window::set_window_overlay,
             commands::window::window_overlay_info,
