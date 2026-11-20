@@ -38,22 +38,18 @@ pub(crate) fn run(
     // page afterwards: a window mapped as the default toplevel is picked up and
     // focused by the compositor, and replacing it means destroying it and
     // building the overlay — a small window flashing past that steals the
-    // keyboard focus of whatever the user was typing in. `KOMOREBI_START_MODE`
-    // (bug repro / QA) pins the mode; otherwise the last choice from the
-    // settings store; overlay is the product default.
+    // keyboard focus of whatever the user was typing in. Overlay is the
+    // product launch mode; `KOMOREBI_START_MODE` pins another mode for bug
+    // repro and QA. A mode chosen during a session is not remembered across
+    // launches, so a dev switch to the plain window cannot make it the
+    // default.
     //
     // The window type is chosen before `apply_overlay`: it needs to know
     // whether the window already is a layer surface, otherwise it warns about
     // tiling and tries to fill a monitor that does not exist yet (the window is
     // still unmapped at this point).
     if let Some(w) = app.get_webview_window("main") {
-        let mode = crate::window::start_mode()
-            .or_else(|| {
-                crate::settings::read_overlay_mode(app.handle())
-                    .as_deref()
-                    .and_then(crate::window::OverlayMode::from_name)
-            })
-            .unwrap_or(crate::window::OverlayMode::Overlay);
+        let mode = crate::window::start_mode().unwrap_or(crate::window::OverlayMode::Overlay);
         crate::window::init_layer_shell_for(&w, mode);
         let effective = crate::window::apply_overlay(&w, mode);
         tracing::info!(
