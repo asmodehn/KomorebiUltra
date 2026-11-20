@@ -7,13 +7,13 @@ import {
 } from "../api";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
-  CloseIcon,
   DownloadIcon,
   EarIcon,
   EyeIcon,
   GearIcon,
   GripIcon,
   LayersIcon,
+  PowerIcon,
   RefreshIcon,
   WarningIcon,
 } from "./icons";
@@ -117,8 +117,8 @@ export function TopBar(props: TopBarProps) {
       {props.showRelationshipBadge && props.relationship && (
         <RelationshipBadge state={props.relationship} />
       )}
-      {/* Overlay toggle — Alt+O and Escape (composer closed) do the same.
-         Icon stays constant; the green dot marks the fullscreen overlay. */}
+      {/* Overlay toggle — Alt+O switches modes; Escape only hides the
+         revealed controls. The green dot marks the fullscreen overlay. */}
       <button
         onClick={props.onToggleOverlay}
         style={iconBtnStyle(props.overlayMode === "overlay")}
@@ -217,7 +217,7 @@ export function TopBar(props: TopBarProps) {
         title={t("topbar.quit")}
         aria-label={t("topbar.quit")}
       >
-        <CloseIcon size={13} />
+        <PowerIcon size={13} />
       </button>
     </div>
   );

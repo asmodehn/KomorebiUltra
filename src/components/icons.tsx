@@ -117,12 +117,13 @@ export function DownloadIcon(p: IconProps = {}) {
   );
 }
 
-export function CloseIcon(p: IconProps = {}) {
+/** Power symbol: quit without the generic close-cross. */
+export function PowerIcon(p: IconProps = {}) {
   return (
     <svg {...base(p)}>
       {p.title && <title>{p.title}</title>}
-      <path d="m6 6 12 12" />
-      <path d="m18 6-12 12" />
+      <path d="M12 3v9" />
+      <path d="M6.3 6.3a8 8 0 1 0 11.4 0" />
     </svg>
   );
 }
