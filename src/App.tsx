@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react";
 import AvatarStage from "./components/AvatarStage";
 import ChatBubble from "./components/ChatBubble";
 import InputField from "./components/InputField";
@@ -7,6 +14,7 @@ import RegionPicker from "./components/RegionPicker";
 import SettingsPanel from "./components/SettingsPanel";
 import { ToastHost, toast } from "./components/Toast";
 import TopBar from "./components/TopBar";
+import { modelClientRect } from "./components/Live2DCanvas/mountScene";
 import { exit as tauriExit } from "@tauri-apps/plugin-process";
 import { invoke } from "@tauri-apps/api/core";
 import { avatarState } from "./avatarState";
@@ -46,9 +54,30 @@ import { useRelationship } from "./hooks/useRelationship";
 import { useListenController } from "./hooks/useListenController";
 import { useInputRegion } from "./hooks/useInputRegion";
 
+interface ModelRect {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+// Revealed panels sit on opposite sides of the character: composer above,
+// control strip below. The strip wraps into two rows so it stays narrow.
+const TOPBAR_WIDTH = 300;
+const TOPBAR_HEIGHT = 64;
+const COMPOSER_WIDTH = 320;
+const COMPOSER_HEIGHT = 56;
+const BUBBLE_WIDTH = 360;
+const PANEL_GAP = 8;
+const REVEAL_GAP = 12;
+const VIEWPORT_MARGIN = 8;
+
 export default function App() {
   // ── UI panels ──────────────────────────────────────────────────────
   const [inputOpen, setInputOpen] = useState(true);
+  // Overlay keeps the chrome hidden until a character tap reveals it. The
+  // normal window keeps its existing `inputOpen` behaviour untouched.
+  const [controlsOpen, setControlsOpen] = useState(false);
   // Bumped when the avatar stage hands a character tap to the message bar,
   // so the composer can (re)focus even though it stays mounted.
   const [inputFocusTick, setInputFocusTick] = useState(0);
@@ -181,9 +210,51 @@ export default function App() {
   const [modeSettled, setModeSettled] = useState(false);
   useInputRegion(overlayMode);
 
+  // The revealed controls and the reply bubble sit next to the character's
+  // drawn bounds, so they follow her drag and survive a window resize. Poll
+  // throughout overlay mode (a reply can arrive while the controls are
+  // hidden); round to pixels so idle animation does not re-render the panels.
+  const [modelRect, setModelRect] = useState<ModelRect | null>(null);
+  useLayoutEffect(() => {
+    if (overlayMode !== "overlay") return;
+    let timer = 0;
+    const tick = () => {
+      const r = modelClientRect();
+      const next = r
+        ? {
+            left: Math.round(r.left),
+            top: Math.round(r.top),
+            right: Math.round(r.right),
+            bottom: Math.round(r.bottom),
+          }
+        : null;
+      setModelRect((prev) => {
+        if (prev === next) return prev;
+        if (
+          prev &&
+          next &&
+          prev.left === next.left &&
+          prev.top === next.top &&
+          prev.right === next.right &&
+          prev.bottom === next.bottom
+        ) {
+          return prev;
+        }
+        return next;
+      });
+      timer = window.setTimeout(tick, 100);
+    };
+    tick();
+    return () => window.clearTimeout(timer);
+  }, [overlayMode]);
+
   /** Single place that changes the mode in the page; the backend stores the
    * choice when the mode is applied, so a relaunch reopens in it. */
   const changeOverlayMode = useCallback((next: WindowOverlayMode) => {
+    if (next === "overlay") {
+      setControlsOpen(false);
+      setModelRect(null);
+    }
     setOverlayMode(next);
   }, []);
 
@@ -225,19 +296,32 @@ export default function App() {
     await applyRequestedMode("normal");
   }, [applyRequestedMode]);
 
-  // Escape leaves overlay mode (unless the composer owns the key while
-  // open) — an explicit off-ramp that does not depend on a global hotkey
-  // being pressed.
+  // One place for the overlay controls' open/close side effects: hiding also
+  // dismisses panels launched from the strip; opening focuses the composer.
+  // Tap, Escape and Alt+Space all use these so they cannot drift apart.
+  const hideOverlayControls = useCallback(() => {
+    setControlsOpen(false);
+    setSettingsOpen(false);
+    setWizardOpen(false);
+  }, []);
+  const showOverlayControls = useCallback(() => {
+    setControlsOpen(true);
+    setInputOpen(true);
+    setInputFocusTick((n) => n + 1);
+  }, []);
+
+  // Escape only hides the overlay controls. Leaving overlay mode is an
+  // explicit TopBar action, not an Escape side effect. The normal window
+  // keeps its own composer-owned Escape handling.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
-      if (overlayMode !== "overlay") return;
-      if (inputOpen) return;
-      void handleExitOverlay();
+      if (overlayMode !== "overlay" || !controlsOpen) return;
+      hideOverlayControls();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [overlayMode, inputOpen, handleExitOverlay]);
+  }, [overlayMode, controlsOpen, hideOverlayControls]);
 
   // A layer surface maps with KeyboardMode::None: COSMIC gives the keyboard
   // to one that asks while it appears, stealing the focus of whatever the
@@ -268,7 +352,14 @@ export default function App() {
 
   // ── Hooks (effects extracted out of App for clarity) ──────────────
   useHotkeys({
-    onToggleInput: useCallback(() => setInputOpen((v) => !v), []),
+    onToggleInput: useCallback(() => {
+      if (overlayMode !== "overlay") {
+        setInputOpen((v) => !v);
+        return;
+      }
+      if (controlsOpen) hideOverlayControls();
+      else showOverlayControls();
+    }, [overlayMode, controlsOpen, hideOverlayControls, showOverlayControls]),
     onVisionRegion: useCallback(
       () => void openPickerWithPrompt(""),
       [openPickerWithPrompt],
@@ -529,12 +620,13 @@ export default function App() {
   };
   handleSubmitRef.current = handleSubmit;
 
-  // Avatar-stage character tap (overlay mode): open the message bar and
-  // hand focus to the composer.
+  // Avatar-stage character tap (overlay mode): toggle the controls. Opening
+  // hands focus to the composer; closing also dismisses anything launched
+  // from the strip, matching Escape and the composer's own close button.
   const handleStageTap = useCallback(() => {
-    setInputOpen(true);
-    setInputFocusTick((n) => n + 1);
-  }, []);
+    if (controlsOpen) hideOverlayControls();
+    else showOverlayControls();
+  }, [controlsOpen, hideOverlayControls, showOverlayControls]);
 
   // Generic vision dispatcher: kicks the chat-state machine the same way
   // handleSubmit does, then awaits the chosen invoke. Backend emits the
@@ -588,6 +680,99 @@ export default function App() {
       (settings?.deepgram_enabled && settings?.has_deepgram_key),
   );
 
+  // In overlay the chrome is hidden until a tap; in a normal window both
+  // panels keep their existing placement and visibility.
+  const overlayRevealed =
+    overlayMode === "overlay" && controlsOpen && modelRect !== null;
+  const showComposer =
+    overlayMode === "overlay"
+      ? overlayRevealed && !settingsOpen && !wizardOpen
+      : inputOpen && !settingsOpen && !wizardOpen;
+  const showTopBar = overlayMode !== "overlay" || overlayRevealed;
+
+  const revealStyle = (): {
+    topBar: CSSProperties | undefined;
+    composer: CSSProperties | undefined;
+    bubble: CSSProperties | undefined;
+  } => {
+    if (overlayMode !== "overlay" || !modelRect) {
+      return { topBar: undefined, composer: undefined, bubble: undefined };
+    }
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const cx = (modelRect.left + modelRect.right) / 2;
+    const roomAbove = modelRect.top - VIEWPORT_MARGIN - REVEAL_GAP;
+    const roomBelow = vh - VIEWPORT_MARGIN - REVEAL_GAP - modelRect.bottom;
+    const stackHeight = COMPOSER_HEIGHT + PANEL_GAP + TOPBAR_HEIGHT;
+    let composerTop: number;
+    let stripTop: number;
+    if (roomAbove >= COMPOSER_HEIGHT && roomBelow >= TOPBAR_HEIGHT) {
+      // The normal case: composer above her, strip below.
+      composerTop = modelRect.top - REVEAL_GAP - COMPOSER_HEIGHT;
+      stripTop = modelRect.bottom + REVEAL_GAP;
+    } else if (roomAbove >= stackHeight) {
+      // She was dragged low: put the whole stack above her.
+      composerTop = modelRect.top - REVEAL_GAP - stackHeight;
+      stripTop = composerTop + COMPOSER_HEIGHT + PANEL_GAP;
+    } else if (roomBelow >= stackHeight) {
+      // She was dragged high: put the whole stack below her.
+      composerTop = modelRect.bottom + REVEAL_GAP;
+      stripTop = composerTop + COMPOSER_HEIGHT + PANEL_GAP;
+    } else {
+      // Neither side fits: keep the panels together on the roomier side.
+      const base =
+        roomAbove >= roomBelow
+          ? VIEWPORT_MARGIN
+          : vh - stackHeight - VIEWPORT_MARGIN;
+      composerTop = base;
+      stripTop = base + COMPOSER_HEIGHT + PANEL_GAP;
+    }
+    const centredLeft = (width: number) =>
+      Math.max(
+        VIEWPORT_MARGIN,
+        Math.min(vw - width - VIEWPORT_MARGIN, cx - width / 2),
+      );
+    // The reply sits beside her, not across the screen. It keeps the same
+    // vertical span as her so it never reaches the strip below.
+    const fitsLeft = modelRect.left - REVEAL_GAP - VIEWPORT_MARGIN >= BUBBLE_WIDTH;
+    const bubbleLeft = fitsLeft
+      ? modelRect.left - REVEAL_GAP - BUBBLE_WIDTH
+      : Math.min(vw - BUBBLE_WIDTH - VIEWPORT_MARGIN, modelRect.right + REVEAL_GAP);
+    return {
+      topBar: {
+        left: centredLeft(TOPBAR_WIDTH),
+        right: "auto",
+        top: stripTop,
+        width: TOPBAR_WIDTH,
+        maxWidth: "calc(100vw - 16px)",
+        flexWrap: "wrap",
+        rowGap: 6,
+        justifyContent: "center",
+      },
+      composer: {
+        left: centredLeft(COMPOSER_WIDTH),
+        right: "auto",
+        top: composerTop,
+        bottom: "auto",
+        width: COMPOSER_WIDTH,
+        maxWidth: "calc(100vw - 16px)",
+        boxSizing: "border-box",
+      },
+      bubble: {
+        left: bubbleLeft,
+        right: "auto",
+        top: modelRect.top,
+        bottom: "auto",
+        width: BUBBLE_WIDTH,
+        maxWidth: "calc(100vw - 16px)",
+        maxHeight: Math.max(1, modelRect.bottom - modelRect.top),
+        boxSizing: "border-box",
+      },
+    };
+  };
+  const { topBar: topBarStyle, composer: composerStyle, bubble: bubbleStyle } =
+    revealStyle();
+
   return (
     <>
       <AvatarStage
@@ -614,6 +799,7 @@ export default function App() {
         onSaveImage={handleSaveImage}
         onCopyImage={handleCopyImage}
         onCancelImage={handleCancelImage}
+        style={bubbleStyle}
         feedbackKey={feedbackKey}
         onFeedback={(rating) => {
           const turn = lastTurnRef.current;
@@ -630,9 +816,13 @@ export default function App() {
         }}
       />
       <InputField
-        open={inputOpen && !settingsOpen && !wizardOpen}
+        open={showComposer}
+        style={composerStyle}
         focusTick={inputFocusTick}
-        onClose={() => setInputOpen(false)}
+        onClose={() => {
+          if (overlayMode === "overlay") setControlsOpen(false);
+          else setInputOpen(false);
+        }}
         onSubmit={handleSubmit}
         onVisionFull={handleVisionFull}
         onOpenVisionRegionPicker={(prompt) => {
@@ -654,39 +844,42 @@ export default function App() {
         onSettingsChanged={refreshSettings}
         settings={settings}
       />
-      <TopBar
-        mode={settings?.mode ?? "auto"}
-        hasKey={settings?.has_openrouter_key ?? false}
-        listenEnabled={settings?.listen_enabled ?? false}
-        listenReady={sttReady}
-        listening={listening}
-        heard={heardHint}
-        onToggleListen={handleToggleListen}
-        onToggleSettings={() => {
-          setWizardOpen(false);
-          setSettingsOpen((v) => !v);
-        }}
-        onToggleWizard={() => {
-          setSettingsOpen(false);
-          setWizardOpen((v) => !v);
-        }}
-        onReset={handleReset}
-        onQuit={() => tauriExit(0)}
-        autoWatch={settings?.auto_screen_watch_enabled === true}
-        autoWatchAvailable={Boolean(settings?.has_openrouter_key)}
-        onToggleAutoWatch={async () => {
-          const next = !(settings?.auto_screen_watch_enabled ?? false);
-          await invoke("set_auto_screen_watch_enabled", { enabled: next });
-          refreshSettings();
-        }}
-        relationship={relationship}
-        showRelationshipBadge={
-          (settings?.relationship_visibility ?? "indicator") !== "hidden"
-        }
-        overlayMode={overlayMode}
-        onToggleOverlay={() => void handleToggleWindow()}
-        onExitOverlay={() => void handleExitOverlay()}
-      />
+      {showTopBar && (
+        <TopBar
+          mode={settings?.mode ?? "auto"}
+          hasKey={settings?.has_openrouter_key ?? false}
+          listenEnabled={settings?.listen_enabled ?? false}
+          listenReady={sttReady}
+          listening={listening}
+          heard={heardHint}
+          onToggleListen={handleToggleListen}
+          style={topBarStyle}
+          onToggleSettings={() => {
+            setWizardOpen(false);
+            setSettingsOpen((v) => !v);
+          }}
+          onToggleWizard={() => {
+            setSettingsOpen(false);
+            setWizardOpen((v) => !v);
+          }}
+          onReset={handleReset}
+          onQuit={() => tauriExit(0)}
+          autoWatch={settings?.auto_screen_watch_enabled === true}
+          autoWatchAvailable={Boolean(settings?.has_openrouter_key)}
+          onToggleAutoWatch={async () => {
+            const next = !(settings?.auto_screen_watch_enabled ?? false);
+            await invoke("set_auto_screen_watch_enabled", { enabled: next });
+            refreshSettings();
+          }}
+          relationship={relationship}
+          showRelationshipBadge={
+            (settings?.relationship_visibility ?? "indicator") !== "hidden"
+          }
+          overlayMode={overlayMode}
+          onToggleOverlay={() => void handleToggleWindow()}
+          onExitOverlay={() => void handleExitOverlay()}
+        />
+      )}
       <RegionPicker
         open={pickerOpen}
         initialPrompt={pickerInitialPrompt}

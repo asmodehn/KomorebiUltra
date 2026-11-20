@@ -1,3 +1,4 @@
+import type { CSSProperties } from "react";
 import { useLocale, t, type DictKey } from "../i18n";
 import {
   STAGE_LABELS,
@@ -43,6 +44,8 @@ export interface TopBarProps {
   onToggleOverlay: () => void;
   /** Leave overlay mode outright (back to a plain, movable window). */
   onExitOverlay: () => void;
+  /** Position override used when the strip is revealed beside the character. */
+  style?: CSSProperties;
 }
 
 /**
@@ -70,6 +73,7 @@ export function TopBar(props: TopBarProps) {
         alignItems: "center",
         fontSize: 11,
         color: "#fff",
+        ...props.style,
       }}
     >
       {/* Window move grip: in overlay mode the avatar no longer drags the

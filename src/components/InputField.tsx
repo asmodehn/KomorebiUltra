@@ -1,5 +1,5 @@
 import { AnimatePresence, motion } from "framer-motion";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { cancelRecording, startRecording, stopRecording } from "../api";
 import { t, useLocale } from "../i18n";
 import {
@@ -24,6 +24,9 @@ interface Props {
   /** Bumped by the avatar stage on overlay-mode character taps so the
    * composer can (re)focus even while staying mounted. */
   focusTick?: number;
+  /** Position override used when the revealed panel is anchored to the
+   * character instead of spanning the bottom of the window. */
+  style?: CSSProperties;
 }
 
 export default function InputField({
@@ -37,6 +40,7 @@ export default function InputField({
   sttEnabled = false,
   visionEnabled = false,
   focusTick = 0,
+  style,
 }: Props) {
   useLocale();
   const [value, setValue] = useState("");
@@ -135,6 +139,7 @@ export default function InputField({
             display: "flex",
             flexDirection: "column",
             gap: 2,
+            ...style,
           }}
         >
           <div style={{ display: "flex", alignItems: "center", gap: 4 }}>

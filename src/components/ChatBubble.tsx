@@ -49,6 +49,8 @@ interface Props {
    * "already rated" lock resets so a new reply can be rated again.
    */
   feedbackKey?: string | number | null;
+  /** Position override used to anchor the reply beside the character. */
+  style?: React.CSSProperties;
 }
 
 // Minimal markdown renderer: triple-backtick fenced code blocks (with
@@ -162,6 +164,7 @@ export default function ChatBubble({
   onCancelImage,
   onFeedback,
   feedbackKey,
+  style,
 }: Props) {
   useLocale();
   // Local lock: only allow one rating per turn (resets when feedbackKey
@@ -217,6 +220,7 @@ export default function ChatBubble({
             whiteSpace: "pre-wrap",
             maxHeight: "45vh",
             overflowY: "auto",
+            ...style,
           }}
         >
           {route && (

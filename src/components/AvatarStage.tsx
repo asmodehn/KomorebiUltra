@@ -18,6 +18,9 @@ const clampOffset = (v: number) => Math.min(2, Math.max(-2, v));
 /** Gap between her and the stage's right and bottom edges when she is
  * placed in the corner (the stage is inset from the window horizontally). */
 const CORNER_MARGIN = 8;
+// In overlay the revealed control strip sits below her, so the launch corner
+// reserves its height as well. The normal window has no revealed strip.
+const OVERLAY_BOTTOM_RESERVE = 84;
 
 /**
  * Avatar stage: renders the Live2D canvas when a model URL is configured
@@ -52,7 +55,7 @@ export default function AvatarStage({
   /** Called after a placement was persisted, so the settings panel re-reads
    * the offset it now holds instead of showing the previous launch's. */
   onPositionSaved?: () => void;
-  /** Overlay-mode character tap: open the message bar. */
+  /** Overlay-mode character tap: toggle the revealed controls. */
   onStageTap?: () => void;
 }) {
   const [size, setSize] = useState(() => ({
@@ -157,12 +160,15 @@ export default function AvatarStage({
         return;
       }
       cornered.current = true;
+      const bottomMargin = overlayMode
+        ? CORNER_MARGIN + OVERLAY_BOTTOM_RESERVE
+        : CORNER_MARGIN;
       const { x, y } = offsetRef.current;
       const nx = clampOffset(
         x + (box.right - CORNER_MARGIN - model.right) / (box.width / 2),
       );
       const ny = clampOffset(
-        y + (box.bottom - CORNER_MARGIN - model.bottom) / (box.height / 2),
+        y + (box.bottom - bottomMargin - model.bottom) / (box.height / 2),
       );
       setOffset({ x: nx, y: ny });
       void save(nx, ny);
@@ -178,7 +184,7 @@ export default function AvatarStage({
       cancelled = true;
       cancelAnimationFrame(raf);
     };
-  }, [modelUrl, placementReady, onPositionSaved]);
+  }, [modelUrl, placementReady, overlayMode, onPositionSaved]);
 
   // ── The character is the move handle in BOTH modes (windowed included):
   // a grab on her nudges the character (avatar nudge, saved on release); a
