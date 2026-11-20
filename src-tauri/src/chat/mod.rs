@@ -81,6 +81,9 @@ impl ChatService {
     pub async fn clear(&self) {
         self.history.lock().await.clear();
         turn_log::reset();
+        // A persistent ACP session keeps its own context. Discard it with
+        // the history, or the next turn would remember discarded turns.
+        komorebi_cloud::AcpClient::reset_session().await;
     }
 
     pub fn cancel(&self) {
