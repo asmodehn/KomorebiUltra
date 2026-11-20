@@ -11,6 +11,7 @@ mod imagegen;
 mod intent;
 mod local_classifier;
 mod models;
+mod platform;
 mod proactive;
 mod react;
 mod relationship;

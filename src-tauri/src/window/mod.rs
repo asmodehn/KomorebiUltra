@@ -15,7 +15,7 @@
 //! Covering the monitor is *not* compositor fullscreen: fullscreen loses the
 //! surface alpha on Wayland (the window renders black despite a transparent
 //! page). On Linux the overlay is a layer-shell surface instead; elsewhere it
-//! is a maximised window. See `linux.rs`.
+//! is a maximised window. See `platform/`.
 //!
 //! A layer surface cannot become a toplevel, so switching the window *type*
 //! recreates the window: the old window is destroyed and a fresh one is built
@@ -80,15 +80,9 @@ impl OverlayMode {
     }
 }
 
-/// Platform capability probe.
-#[cfg(target_os = "linux")]
+/// Platform capability probe, answered by the selected surface.
 pub fn overlay_supported() -> bool {
-    linux::overlay_supported()
-}
-
-#[cfg(not(target_os = "linux"))]
-pub fn overlay_supported() -> bool {
-    false
+    crate::platform::surface().info().overlay_supported
 }
 
 /// Apply an overlay mode to a Tauri webview window.
@@ -171,15 +165,9 @@ fn fill_monitor(window: &WebviewWindow) {
     }
 }
 
-/// True when the platform already covers the screen with a layer surface.
-#[cfg(target_os = "linux")]
+/// True when the selected surface already covers the screen with a layer.
 fn layer_shell_active() -> bool {
-    linux::layer_shell_active()
-}
-
-#[cfg(not(target_os = "linux"))]
-fn layer_shell_active() -> bool {
-    false
+    crate::platform::surface().info().layer_shell_active
 }
 
 /// One-time window setup that must happen before the window is first mapped:
@@ -187,13 +175,7 @@ fn layer_shell_active() -> bool {
 /// shown and by the recreation after a mode change, so the layer-surface flag
 /// always describes the current window.
 pub fn init_layer_shell_for(window: &WebviewWindow, mode: OverlayMode) {
-    #[cfg(target_os = "linux")]
-    linux::set_layer_shell(
-        window,
-        matches!(mode, OverlayMode::Overlay) && layer_shell_supported(),
-    );
-    #[cfg(not(target_os = "linux"))]
-    let _ = (window, mode);
+    crate::platform::surface().init(window, mode);
 }
 
 /// Let the overlay take keyboard focus on demand (Wayland layer surface).
@@ -202,35 +184,21 @@ pub fn init_layer_shell_for(window: &WebviewWindow, mode: OverlayMode) {
 /// must not ask for the keyboard, or the compositor hands it the focus the
 /// moment it appears.
 pub fn allow_keyboard(window: &WebviewWindow) {
-    #[cfg(target_os = "linux")]
-    linux::allow_keyboard(window);
-    #[cfg(not(target_os = "linux"))]
-    let _ = window;
+    crate::platform::surface().allow_keyboard(window);
 }
 
 /// Whether this build/run can realize `overlay` as a Wayland layer surface.
-#[cfg(target_os = "linux")]
 pub fn layer_shell_supported() -> bool {
-    linux::layer_shell_supported()
-}
-
-#[cfg(not(target_os = "linux"))]
-pub fn layer_shell_supported() -> bool {
-    false
+    crate::platform::surface().info().layer_shell_supported
 }
 
 /// True when the requested mode cannot be reached by mutating the current
 /// window: a layer surface cannot become a toplevel, and a mapped window
 /// cannot be promoted to one. Overlay is a layer surface whenever the
 /// platform supports it, so the two modes are two different window types.
-#[cfg(target_os = "linux")]
 pub fn needs_recreate(mode: OverlayMode) -> bool {
-    linux::needs_recreate(mode)
-}
-
-#[cfg(not(target_os = "linux"))]
-pub fn needs_recreate(_mode: OverlayMode) -> bool {
-    false
+    let wants_layer_shell = matches!(mode, OverlayMode::Overlay) && layer_shell_supported();
+    wants_layer_shell != layer_shell_active()
 }
 
 /// `KOMOREBI_START_MODE`, when it names a mode (an explicit launch, which
@@ -309,20 +277,9 @@ pub fn create_main_window(
     Ok(window)
 }
 
-#[cfg(target_os = "linux")]
 fn platform_apply(window: &WebviewWindow, mode: OverlayMode) -> OverlayMode {
-    linux::apply_overlay(window, mode)
+    crate::platform::surface().apply(window, mode)
 }
-
-#[cfg(not(target_os = "linux"))]
-fn platform_apply(_window: &WebviewWindow, mode: OverlayMode) -> OverlayMode {
-    // `overlay` means something here too (frontmost + covering the screen),
-    // so it must not be downgraded to a plain always-on-top window.
-    mode
-}
-
-#[cfg(target_os = "linux")]
-mod linux;
 
 mod frame;
 

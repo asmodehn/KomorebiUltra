@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 export interface WindowOverlayInfo {
   supported: boolean;
   mode: WindowOverlayMode;
+  backend: string;
 }
 
 export type WindowOverlayMode = "normal" | "overlay";

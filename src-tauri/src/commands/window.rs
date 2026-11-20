@@ -16,6 +16,8 @@ use crate::window::{
 pub struct OverlayInfo {
     pub supported: bool,
     pub mode: OverlayMode,
+    /// Selected platform surface, for headless verification and logs.
+    pub backend: &'static str,
 }
 
 /// Apply `mode`, replacing the window when the window *type* has to change.
@@ -87,6 +89,7 @@ pub fn window_overlay_info() -> OverlayInfo {
     OverlayInfo {
         supported: overlay_supported(),
         mode: crate::window::current_mode(),
+        backend: crate::platform::surface().name(),
     }
 }
 
