@@ -16,34 +16,33 @@ export interface ExpressiveModel {
   };
 }
 
-export function tryMotion(
+export async function tryMotion(
   model: unknown,
   group: string,
   index?: number,
-): boolean {
+  priority = 2,
+): Promise<boolean> {
   const m = model as ExpressiveModel;
   if (typeof m.motion !== "function") return false;
   try {
-    // Priority 2 = NORMAL in pixi-live2d-display; lets idle interrupt
-    // nothing but intentional mode motions interrupt idle.
-    const result = m.motion(group, index, 2);
-    // pixi-live2d-display returns a Promise<boolean> that resolves false
-    // when the motion group is missing. We fire-and-forget but return
-    // true for the sync path so the caller can at least try others on
-    // throw.
-    if (result && typeof (result as Promise<unknown>).then === "function") {
-      return true;
-    }
-    return !!result;
+    // Priority 2 = NORMAL in pixi-live2d-display; 3 = FORCE, which
+    // interrupts a running motion. The library resolves its Promise
+    // false for a missing group or a rejected priority, so the result
+    // must be awaited before a caller decides whether to fall back.
+    return !!(await m.motion(group, index, priority));
   } catch {
     /* no such motion group — ignore */
     return false;
   }
 }
 
-export function tryMotionAny(model: unknown, groups: string[]): boolean {
+export async function tryMotionAny(
+  model: unknown,
+  groups: string[],
+  priority = 2,
+): Promise<boolean> {
   for (const g of groups) {
-    if (tryMotion(model, g)) return true;
+    if (await tryMotion(model, g, undefined, priority)) return true;
   }
   return false;
 }

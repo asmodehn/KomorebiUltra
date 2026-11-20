@@ -312,12 +312,12 @@ export async function mountLive2DScene(
         console.log(`[avatar] emotion → ${s.emotion}`);
         tryExpressionAny(model, EXPRESSION_MAP[s.emotion]);
         const emotionMotion = EMOTION_MOTION_MAP[s.emotion];
-        if (emotionMotion) tryMotionAny(model, emotionMotion);
+        if (emotionMotion) void tryMotionAny(model, emotionMotion);
       }
       if (s.mode !== lastMode) {
         lastMode = s.mode;
         const motion = MOTION_MAP[s.mode];
-        if (motion) tryMotionAny(model, [motion]);
+        if (motion) void tryMotionAny(model, [motion]);
       }
     });
 
@@ -329,12 +329,33 @@ export async function mountLive2DScene(
     // mao_pro packs ALL non-idle motions (mtn_02..04 + special_01..03)
     // into the unnamed group `""` of the model3.json, so we randomise
     // an index within that group on top of trying conventional names.
+    // The motion manager rejects a request for the same group and index
+    // that is already playing, even at FORCE priority. Never pick the
+    // active special: a second tap has to start a fresh motion.
+    const pickSpecialIndex = () => {
+      const st = (
+        model as unknown as {
+          internalModel?: {
+            motionManager?: {
+              state?: { currentGroup?: string; currentIndex?: number };
+            };
+          };
+        }
+      ).internalModel?.motionManager?.state;
+      const active = st?.currentGroup === "" ? st?.currentIndex : -1;
+      const choices = [3, 4, 5].filter((i) => i !== active);
+      return choices[Math.floor(Math.random() * choices.length)];
+    };
+
     let nextSpecialAt = performance.now() + 30000 + Math.random() * 30000;
-    const specialTimer = window.setInterval(() => {
+    const specialTimer = window.setInterval(async () => {
       const now = performance.now();
       if (now < nextSpecialAt) return;
       if (lastMode !== "idle") return;
-      const played = tryMotionAny(model, [
+      // Reserve the next slot before awaiting: a slow motion load must
+      // not let the 5 s tick start a second special.
+      nextSpecialAt = now + 45000 + Math.random() * 45000;
+      const played = await tryMotionAny(model, [
         "special_01",
         "special_02",
         "special_03",
@@ -345,9 +366,8 @@ export async function mountLive2DScene(
         // mao_pro's "" group has 6 entries (indices 0–5); 3–5 are the
         // brush "special" animations. Picking a random one keeps the
         // performance varied.
-        tryMotion(model, "", 3 + Math.floor(Math.random() * 3));
+        await tryMotion(model, "", pickSpecialIndex());
       }
-      nextSpecialAt = now + 45000 + Math.random() * 45000;
     }, 5000);
 
     // Click-to-interact: tap on the avatar → play a random body/head
@@ -385,7 +405,7 @@ export async function mountLive2DScene(
       pressY = e.clientY;
       pressAt = performance.now();
     };
-    const onPointerUp = (e: PointerEvent) => {
+    const onPointerUp = async (e: PointerEvent) => {
       if (e.button !== 0 || pressAt === 0) return;
       const dx = e.clientX - pressX;
       const dy = e.clientY - pressY;
@@ -411,18 +431,20 @@ export async function mountLive2DScene(
       const headGroups = ["tap_head", "TapHead"];
       let played = false;
       if (zone === "head") {
-        played = tryMotionAny(model, headGroups);
+        played = await tryMotionAny(model, headGroups, 3);
       }
       if (!played) {
         // Indices 3, 4, 5 of group "" map to special_01/02/03 in
         // mao_pro.model3.json — the brush-stroke animations.
-        const idx = 3 + Math.floor(Math.random() * 3);
-        played = tryMotion(model, "", idx);
+        played = await tryMotion(model, "", pickSpecialIndex(), 3);
       }
       if (!played) {
         // Last-ditch fallback: try named special groups.
-        tryMotionAny(model, ["special_01", "special_02", "special_03"]);
+        await tryMotionAny(model, ["special_01", "special_02", "special_03"], 3);
       }
+      // The motion load can outlive this scene; a disposed model must
+      // not speak or open the bar for a tap that no longer belongs to it.
+      if (isDisposed()) return;
       // Fire-and-forget reaction line through whichever TTS provider
       // is active. Silent when TTS is disabled. The Rust side now
       // generates the line via LLM (mode-aware, multilingual) and
