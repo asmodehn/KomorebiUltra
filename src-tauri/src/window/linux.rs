@@ -156,9 +156,11 @@ fn attach(window: &WebviewWindow) -> bool {
     }
     gtk_layer_shell::set_namespace(&gw, "komorebi-overlay");
     gtk_layer_shell::set_layer(&gw, gtk_layer_shell::Layer::Overlay);
-    // OnDemand, not None: the chat input and the top bar must be able to take
-    // keyboard focus when the user clicks them.
-    gtk_layer_shell::set_keyboard_mode(&gw, gtk_layer_shell::KeyboardMode::OnDemand);
+    // None while the surface is mapped: a layer surface that asks for the
+    // keyboard is handed it by the compositor as soon as it appears, which
+    // steals the focus of whatever the user was typing in. The page asks for
+    // OnDemand on its first click instead (see `allow_keyboard`).
+    gtk_layer_shell::set_keyboard_mode(&gw, gtk_layer_shell::KeyboardMode::None);
     for edge in [
         gtk_layer_shell::Edge::Left,
         gtk_layer_shell::Edge::Right,
@@ -171,6 +173,23 @@ fn attach(window: &WebviewWindow) -> bool {
     gtk_layer_shell::set_exclusive_zone(&gw, -1);
     tracing::info!("gtk-layer-shell attached: window is an overlay layer surface");
     true
+}
+
+/// Let the overlay take keyboard focus on demand: the chat input and the top
+/// bar need keys, but only once the user has picked the window. Safe to call
+/// on a window that is not a layer surface (windowed mode, other platforms).
+pub(super) fn allow_keyboard(window: &WebviewWindow) {
+    #[cfg(feature = "layer-shell")]
+    {
+        let Ok(gw) = window.gtk_window() else {
+            return;
+        };
+        if gtk_layer_shell::is_layer_window(&gw) {
+            gtk_layer_shell::set_keyboard_mode(&gw, gtk_layer_shell::KeyboardMode::OnDemand);
+        }
+    }
+    #[cfg(not(feature = "layer-shell"))]
+    let _ = window;
 }
 
 /// One-shot hint when the compositor keeps tiling the overlay window.

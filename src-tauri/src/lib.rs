@@ -199,6 +199,7 @@ pub fn run() {
             commands::overlay::set_input_region,
             commands::window::set_window_overlay,
             commands::window::window_overlay_info,
+            commands::window::overlay_keyboard_on_demand,
             commands::window::agent_report,
             // Agent
             commands::agent::set_proactive_enabled,

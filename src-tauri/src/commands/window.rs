@@ -70,6 +70,18 @@ pub fn set_window_overlay(
     effective
 }
 
+/// Let the overlay accept keyboard focus after the user has picked it.
+///
+/// A layer surface must map with `KeyboardMode::None`: on COSMIC, asking for
+/// the keyboard while the surface appears hands it the focus immediately. The
+/// page calls this on its first pointer event over the character or the UI
+/// (elsewhere the overlay is click-through), so a click on the chat input can
+/// focus it without the window grabbing the keyboard at startup.
+#[tauri::command]
+pub fn overlay_keyboard_on_demand(window: WebviewWindow) {
+    crate::window::allow_keyboard(&window);
+}
+
 #[tauri::command]
 pub fn window_overlay_info() -> OverlayInfo {
     OverlayInfo {

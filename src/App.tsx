@@ -28,6 +28,7 @@ import {
   saveGeneratedImage,
   sendMessage,
   setListenEnabled,
+  allowOverlayKeyboard,
   getWindowOverlayInfo,
   setWindowOverlay,
   type WindowOverlayMode,
@@ -237,6 +238,33 @@ export default function App() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [overlayMode, inputOpen, handleExitOverlay]);
+
+  // A layer surface maps with KeyboardMode::None: COSMIC gives the keyboard
+  // to one that asks while it appears, stealing the focus of whatever the
+  // user was typing in. Ask for OnDemand on the first pointer contact with
+  // the character or the UI instead - outside their rects the overlay is
+  // click-through, so no event reaches the page. The mode only needs
+  // switching once; keep listening if the IPC fails (the window may be being
+  // replaced) so a later pointer event can retry.
+  useEffect(() => {
+    const stop = () => {
+      window.removeEventListener("pointerdown", onPointer);
+      window.removeEventListener("pointermove", onPointer);
+    };
+    let pending = false;
+    const onPointer = () => {
+      if (pending) return;
+      pending = true;
+      void allowOverlayKeyboard()
+        .then(stop)
+        .catch(() => {
+          pending = false;
+        });
+    };
+    window.addEventListener("pointerdown", onPointer);
+    window.addEventListener("pointermove", onPointer);
+    return stop;
+  }, []);
 
   // ── Hooks (effects extracted out of App for clarity) ──────────────
   useHotkeys({
