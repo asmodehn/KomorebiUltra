@@ -421,8 +421,18 @@ export async function mountLive2DScene(
       // the canvas corner are stage coordinates. Checked before the
       // overlay branch so a tap on the empty desktop area of the
       // overlay window does not open the message bar.
-      if (!modelBounds().contains(e.clientX - r.left, e.clientY - r.top)) return;
-      const ny = (e.clientY - r.top) / r.height;
+      const bounds = modelBounds();
+      if (!bounds.contains(e.clientX - r.left, e.clientY - r.top)) return;
+      // The zones describe parts of her body, not parts of the window:
+      // measuring against the canvas would make a character standing in
+      // the lower-right corner register every tap as a hand tap.
+      const ny =
+        bounds.height > 0
+          ? Math.min(
+              1,
+              Math.max(0, (e.clientY - r.top - bounds.y) / bounds.height),
+            )
+          : 0.5;
       // Three vertical zones — the lower third of the avatar covers
       // her hand holding the paint brush, so taps there should always
       // play the brush-stroke specials and trigger the "drawing"
