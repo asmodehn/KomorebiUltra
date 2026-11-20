@@ -78,8 +78,8 @@ export interface MountOptions {
   isDisposed: () => boolean;
   /** Called once the Live2D model is ready so the caller can re-layout. */
   onModelReady: (info: ModelInfo) => void;
-  /** Overlay mode: a character tap opens the message bar instead of
-   * playing a random reaction. */
+  /** Overlay mode: a character tap toggles the message bar; the reaction
+   * still plays so the tap does not feel dead. */
   overlay?: boolean;
   /** Overlay-mode character tap hand-off. */
   onCharacterTap?: () => void;
@@ -461,9 +461,9 @@ export async function mountLive2DScene(
       // falls back to canned localized strings on timeout.
       invoke("speak_reaction", { zone }).catch(() => {});
       // Overlay mode: the character is also the "talk to me" surface, so
-      // the same tap opens the message bar. It does so in addition to the
-      // reaction above: a tap that only opened a text box read as a dead
-      // click, because she never answered it.
+      // the same tap toggles the revealed controls. It does so in addition
+      // to the reaction above: a tap that only opened a text box read as a
+      // dead click, because she never answered it.
       if (overlay) onCharacterTap?.();
     };
     canvas.addEventListener("pointerdown", onPointerDown);

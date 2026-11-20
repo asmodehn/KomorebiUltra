@@ -45,7 +45,7 @@ function recordKeys(): void {
         k: e.key,
         mods,
         t: Math.round(performance.now()),
-        target: (e.target as HTMLElement | null)?.tagName.toLowerCase() ?? "?",
+        target: (e.target as HTMLElement | null)?.tagName?.toLowerCase() ?? "?",
       });
     },
     true,

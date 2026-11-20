@@ -30,8 +30,8 @@ export default function Live2DCanvas({
   /** Fraction of the canvas box the model occupies in its limiting
    * dimension, before `zoom`. */
   fitFraction?: number;
-  /** Overlay mode: taps on the character open the message bar instead of
-   * firing a random reaction. */
+  /** Overlay mode: a clean tap on the character toggles the message bar;
+   * the reaction still plays so the tap does not feel dead. */
   overlay?: boolean;
   onCharacterTap?: () => void;
 }) {
