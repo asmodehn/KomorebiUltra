@@ -121,7 +121,10 @@ export default function InputField({
           onSubmit={(e) => {
             e.preventDefault();
             const text = value.trim();
-            if (text) onSubmit(text);
+            if (text) {
+              setValue("");
+              onSubmit(text);
+            }
           }}
           style={{
             position: "absolute",
