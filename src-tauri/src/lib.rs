@@ -40,15 +40,12 @@ pub fn run() {
 
     tauri::Builder::default()
         .on_window_event(|window, event| {
-            match event {
-                // Intercept window close → hide to tray instead of quitting.
-                // Users still have the tray menu "Quit Komorebi" for a real
-                // exit.
-                tauri::WindowEvent::CloseRequested { api, .. } => {
-                    api.prevent_close();
-                    let _ = window.hide();
-                }
-                _ => {}
+            // Intercept window close → hide to tray instead of quitting.
+            // Users still have the tray menu "Quit Komorebi" for a real
+            // exit.
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
             }
         })
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {

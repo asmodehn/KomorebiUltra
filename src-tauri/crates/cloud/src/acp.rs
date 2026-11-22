@@ -559,7 +559,11 @@ impl Turn {
                     Some(ID_INITIALIZE) => {
                         self.claude =
                             msg["result"]["agentCapabilities"]["_meta"]["claudeCode"].is_object();
-                        vec![Step::Send(request(ID_SESSION_NEW, "session/new", self.session_new()))]
+                        vec![Step::Send(request(
+                            ID_SESSION_NEW,
+                            "session/new",
+                            self.session_new(),
+                        ))]
                     }
                     Some(ID_SESSION_NEW) => match msg["result"]["sessionId"].as_str() {
                         Some(session) => {
@@ -689,9 +693,11 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#,
         ));
         assert_eq!(method_of(&s[0]), "session/new");
-        assert!(t.on_message(&parse(
-            r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s1"}}"#,
-        )).is_empty());
+        assert!(t
+            .on_message(&parse(
+                r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s1"}}"#,
+            ))
+            .is_empty());
         assert_eq!(t.session_id.as_deref(), Some("s1"));
     }
 

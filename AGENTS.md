@@ -4,6 +4,27 @@
 
 Queued work for fresh sessions: `docs/agents/next-sessions.md`. When you finish a queued block, delete it there.
 
+## Test-first for every change
+
+"you should also test every change you make tdd style" (owner, 2026-11-22)
+
+Facts:
+- The full local CI matrix in `.github/workflows/ci.yml` found two red gates in files from earlier commits on the integrated line: `crates/cloud/src/acp.rs` (fmt) and the close handler in `src-tauri/src/lib.rs` (clippy). Narrower checks on the current branch were green.
+- The owner corrected that the earlier commits are agent work too.
+
+Rules:
+- Run the exact local CI matrix from `.github/workflows/ci.yml`, from its working directories, before declaring any change done — because a narrower suite can be green while CI is red.
+- Treat every commit on the integrated line as our work — because a red from an earlier agent commit is still ours, not "pre-existing" to dismiss.
+- Use the context-split TDD sequence for behaviour changes; for lint/format-only changes and every done declaration, step 9 review still runs — because the skill excludes the sequence for those changes, not the review.
+- Keep spec, test author and implementer separate: only the spec crosses, never the plan — because tests written by the implementer otherwise encode the intended code.
+- Keep the test set in the tree, or name by-hand checks when tests are waived — because an unrecorded check guards nothing.
+
+Out of reach:
+- A green suite cannot prove absence of defects; it is a floor, not proof.
+
+Costs (derived):
+- Full CI and a fresh-context review on every change cost time and a subagent dispatch.
+
 ## Agent skills
 
 ### Issue tracker
@@ -24,9 +45,10 @@ Do not test the window by opening it on the operator's desktop, and never
 inject input into their session. Two dev-only tools cover it:
 
 - **Agent frames** — `KOMOREBI_AGENT_DIR=<dir>` (debug builds) makes the app
-  write window-area PNGs and a `state.json` (overlay mode, OS click-through
-  rects, DOM nodes with labels, focus, last keys), and accept commands
-  (`frame`, `overlay|normal|always_on_top`, `eval <js>`, `hide`/`show`). Run
+  write window-area PNGs and a `state.json` (overlay presentation, selected
+  backend, OS click-through rects, DOM nodes with labels, focus, last keys),
+  and accept commands
+  (`frame`, `watch`, `eval <js>`, `hide`/`show`, `focus`, `gtk`). Run
   with `KOMOREBI_HEADLESS=<seconds>` to keep the window unmapped; the deadline
   is mandatory and the app exits by itself. See `docs/agents/agent-frames.md`.
 - **Headless sandbox** — `scripts/agent-sandbox.sh up && scripts/agent-sandbox.sh
@@ -46,3 +68,13 @@ sandbox for *window-management* truth; when they disagree, the bug is in
 windowing, not in the UI. Compositor fullscreen loses transparency, so
 `overlay` uses Wayland layer-shell instead (see `docs/overlay.md`); never
 "fix" coverage by fullscreening the window.
+
+### Window keyboard focus
+
+Never let the layer-surface overlay ask for keyboard focus while it maps. It
+must map with `KeyboardMode::None`, then switch to `OnDemand` only when the
+page receives its first pointer event on the character or a UI control. COSMIC
+hands the keyboard to a mapping layer surface immediately otherwise, so this
+would steal keys from whichever window the user was typing in. The window
+also starts unfocused. Do not change this to fix a typing or focus complaint
+without measuring startup focus first. See `docs/overlay.md`.
