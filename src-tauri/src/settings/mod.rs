@@ -20,7 +20,6 @@
 //! * [`agent`] — agent workspace, proactive, desktop automation.
 //! * [`game_coach`] — Game Coach (vision/text split, see proposal 0002).
 //! * [`imagegen`] — Image-generation provider + parameters.
-//! * [`overlay`] — remembered window mode (frontmost overlay vs windowed).
 //! * [`weather`] — Weather provider + helper to assemble a `WeatherConfig`.
 //! * [`user`] — user name, language, relationship layer.
 //! * [`telemetry`] — feedback telemetry + anonymous install token.
@@ -51,7 +50,6 @@ mod avatar;
 mod defaults;
 mod game_coach;
 mod imagegen;
-mod overlay;
 mod routing;
 mod store;
 mod telemetry;
@@ -98,7 +96,6 @@ pub use imagegen::{
     set_imagegen_openrouter_model, set_imagegen_provider, set_imagegen_replicate_model,
     set_imagegen_size, set_imagegen_steps,
 };
-pub use overlay::{read_overlay_mode, set_overlay_mode};
 pub use routing::{
     get_acp_agent_command, get_chat_tool_calls_enabled, get_classifier_model, get_gpu_layers,
     get_local_classifier_model_path, get_local_model_path, get_mode, get_openrouter_model,

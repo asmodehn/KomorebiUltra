@@ -18,25 +18,22 @@ const clampOffset = (v: number) => Math.min(2, Math.max(-2, v));
 /** Gap between her and the stage's right and bottom edges when she is
  * placed in the corner (the stage is inset from the window horizontally). */
 const CORNER_MARGIN = 8;
-// In overlay the revealed control strip sits below her, so the launch corner
-// reserves its height as well. The normal window has no revealed strip.
-const OVERLAY_BOTTOM_RESERVE = 84;
+// The revealed control strip sits below her, so the launch corner reserves
+// its height as well.
+const BOTTOM_RESERVE = 84;
 
 /**
  * Avatar stage: renders the Live2D canvas when a model URL is configured
  * (and the Cubism runtime is available), otherwise shows an animated SVG
- * placeholder. Doubles as the character move handle: a grab nudges the
- * character; the top bar keeps the explicit window move grip.
+ * placeholder. A grab nudges the character; empty stage space is click-through.
  *
- * Tracks window size so the avatar scales responsively when the user
- * resizes the Komorebi window.
+ * Tracks window size so the avatar scales responsively with the overlay.
  */
 export default function AvatarStage({
   modelUrl,
   zoom = 1,
   offsetX = 0,
   offsetY = 0,
-  overlayMode = false,
   placementReady = false,
   onPositionSaved,
   onStageTap,
@@ -45,12 +42,8 @@ export default function AvatarStage({
   zoom?: number;
   offsetX?: number;
   offsetY?: number;
-  /** Character move handle in both modes; empty-stage grabs are
-   * click-through (overlay) / no-ops (windowed). */
-  overlayMode?: boolean;
-  /** True once the window mode and the stored settings have both settled:
-   * the launch placement measures the stage, so it must not run against the
-   * throwaway window the page boots in (see the effect below). */
+  /** True once the stored settings have loaded: the launch placement uses
+   * the stored offset, so it must not run against the defaults. */
   placementReady?: boolean;
   /** Called after a placement was persisted, so the settings panel re-reads
    * the offset it now holds instead of showing the previous launch's. */
@@ -98,10 +91,10 @@ export default function AvatarStage({
   // not a fixed shape, and the offset is a fraction of half the stage, so the
   // shift that lands her in the corner depends on her size and the window's.
   // It runs once per launch, after the stage and the stored offset have
-  // settled, and the launch state is the backend's: a window-type switch
-  // reloads the page inside the same process and must keep a drag. Measured
-  // once only: after a resize the 8 px gap is no longer exact, and re-running
-  // it would fight a drag, which is fine — she may sit anywhere.
+  // settled, and the launch state lives in the process: a page reload must
+  // keep a drag. Measured once only: after a resize the 8 px gap is no longer
+  // exact, and re-running it would fight a drag, which is fine — she may sit
+  // anywhere.
   const cornered = useRef(false);
   useEffect(() => {
     if (!modelUrl || !placementReady) return;
@@ -119,10 +112,9 @@ export default function AvatarStage({
         // that never got the value.
         return;
       }
-      // Done only once the save landed: the page can be destroyed in between
-      // (a launch is exactly when a window switch is pending), and a launch
-      // recorded as done without the stored value would leave the next page
-      // showing her somewhere the store does not agree with.
+      // Done only once the save landed: the page can be destroyed in between,
+      // and a launch recorded as done without the stored value would leave
+      // the next page showing her somewhere the store does not agree with.
       await markAvatarCornerDone().catch(() => {
         // Best effort: a later page places her again, which is the same place.
       });
@@ -141,10 +133,10 @@ export default function AvatarStage({
         ? modelClientRect()
         : null;
       const box = stage.getBoundingClientRect();
-      // The stage box is sized from a `resize` handler, and a mode switch that
-      // resizes the window in place (no layer shell) updates the window before
-      // that handler runs: measuring now would corner her against the boot
-      // geometry and mark the launch done. Wait for the box to match the window.
+      // The stage box is sized from a `resize` handler, and a relayout can
+      // update the window before that handler runs: measuring now would corner
+      // her against stale geometry and mark the launch done. Wait for the box
+      // to match the window.
       const liveW = Math.max(220, window.innerWidth - 24);
       const liveH = Math.max(260, window.innerHeight - 120);
       const boxStale =
@@ -160,9 +152,7 @@ export default function AvatarStage({
         return;
       }
       cornered.current = true;
-      const bottomMargin = overlayMode
-        ? CORNER_MARGIN + OVERLAY_BOTTOM_RESERVE
-        : CORNER_MARGIN;
+      const bottomMargin = CORNER_MARGIN + BOTTOM_RESERVE;
       const { x, y } = offsetRef.current;
       const nx = clampOffset(
         x + (box.right - CORNER_MARGIN - model.right) / (box.width / 2),
@@ -173,8 +163,8 @@ export default function AvatarStage({
       setOffset({ x: nx, y: ny });
       void save(nx, ny);
     };
-    // The launch state is the backend's, so the throwaway first page of a
-    // launch cannot mark it and the page that survives still places her.
+    // The launch state lives in the process, so a page reload cannot mark it
+    // and the page that survives still places her.
     void avatarCornerPending()
       .catch(() => false)
       .then((pending) => {
@@ -184,13 +174,11 @@ export default function AvatarStage({
       cancelled = true;
       cancelAnimationFrame(raf);
     };
-  }, [modelUrl, placementReady, overlayMode, onPositionSaved]);
+  }, [modelUrl, placementReady, onPositionSaved]);
 
-  // ── The character is the move handle in BOTH modes (windowed included):
-  // a grab on her nudges the character (avatar nudge, saved on release); a
-  // grab on the empty stage does nothing (overlay: click-through, the
-  // desktop keeps the click). The window itself is moved through the top-bar
-  // move grip, which converts to a native window drag in windowed mode.
+  // ── The character is the move handle: a grab on her nudges the character
+  // (avatar nudge, saved on release); a grab on the empty stage does nothing —
+  // it is click-through, so the desktop keeps the click.
   const onStagePointerDown = (e: React.PointerEvent) => {
     const model = modelClientRect();
     const inside =
@@ -200,8 +188,7 @@ export default function AvatarStage({
         e.clientY >= model.top &&
         e.clientY <= model.top + model.height);
     if (!inside) {
-      // Grabbed empty stage: click-through (overlay) / nothing to move
-      // (windowed) — neither drags the window.
+      // Grabbed empty stage: click-through, the desktop keeps the click.
       return;
     }
     dragRef.current = {
@@ -282,13 +269,11 @@ export default function AvatarStage({
           width={W}
           height={H}
           zoom={zoom}
-          // In the fullscreen overlay she is furniture on the desktop, not
-          // the window's content: a third of the screen, leaving the rest to
-          // the desktop she stands on.
-          fitFraction={overlayMode ? 1 / 3 : 0.9}
+          // She is furniture on the desktop, not the window's content: a
+          // third of the screen, leaving the rest to the desktop she stands on.
+          fitFraction={1 / 3}
           offsetX={offset.x}
           offsetY={offset.y}
-          overlay={overlayMode}
           onCharacterTap={() => onStageTap?.()}
         />
       ) : (

@@ -15,47 +15,29 @@ pub(crate) fn run(
     app: &mut tauri::App,
     toggle_input: Shortcut,
     vision_region: Shortcut,
-    overlay: Shortcut,
-    toggle_window: Shortcut,
 ) -> Result<(), Box<dyn std::error::Error>> {
     app.global_shortcut().register(toggle_input)?;
     if let Err(e) = app.global_shortcut().register(vision_region) {
         tracing::warn!(?e, "failed to register Alt+V hotkey");
     }
-    if let Err(e) = app.global_shortcut().register(overlay) {
-        tracing::warn!(?e, "failed to register Alt+O overlay hotkey");
-    }
-    if let Err(e) = app.global_shortcut().register(toggle_window) {
-        tracing::warn!(?e, "failed to register F11 window toggle hotkey");
-    }
 
-    // The main window is created with `visible: false` so that the mode can be
-    // applied while the widget is still unmapped: gtk-layer-shell re-creates
+    // The main window is created with `visible: false` so the surface can be
+    // prepared while the widget is still unmapped: gtk-layer-shell re-creates
     // the GdkWindow and refuses a mapped widget. It is shown below unless this
     // is a headless run.
     //
-    // The mode is applied here, before the window is mapped, and not by the
-    // page afterwards: a window mapped as the default toplevel is picked up and
-    // focused by the compositor, and replacing it means destroying it and
-    // building the overlay — a small window flashing past that steals the
-    // keyboard focus of whatever the user was typing in. Overlay is the
-    // product launch mode; `KOMOREBI_START_MODE` pins another mode for bug
-    // repro and QA. A mode chosen during a session is not remembered across
-    // launches, so a dev switch to the plain window cannot make it the
-    // default.
-    //
-    // The window type is chosen before `apply_overlay`: it needs to know
-    // whether the window already is a layer surface, otherwise it warns about
-    // tiling and tries to fill a monitor that does not exist yet (the window is
-    // still unmapped at this point).
+    // This must happen here and not from the page afterwards: a window mapped
+    // as the default toplevel is picked up and focused by the compositor, and
+    // replacing it would flash a small window past and steal the keyboard from
+    // whatever the user was typing in. The surface is selected once from the
+    // OS capability and the optional `KOMOREBI_START_MODE=normal` dev pin;
+    // nothing in the page can change it at runtime.
     if let Some(w) = app.get_webview_window("main") {
-        let mode = crate::window::start_mode().unwrap_or(crate::window::OverlayMode::Overlay);
-        crate::window::init_layer_shell_for(&w, mode);
-        let effective = crate::window::apply_overlay(&w, mode);
+        crate::window::prepare_surface(&w);
+        crate::window::apply_overlay(&w);
         tracing::info!(
-            ?mode,
-            ?effective,
-            "startup: window mode applied before mapping"
+            backend = crate::platform::surface().name(),
+            "startup: overlay applied before mapping"
         );
     }
 

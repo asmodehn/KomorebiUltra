@@ -25,7 +25,6 @@ mod weather;
 mod window;
 
 use std::sync::Arc;
-use tauri::Manager;
 use tauri_plugin_global_shortcut::ShortcutState;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -37,7 +36,7 @@ pub fn run() {
         )
         .init();
 
-    let (toggle_input, vision_region, overlay, toggle_window) = shortcuts::defaults();
+    let (toggle_input, vision_region) = shortcuts::defaults();
 
     tauri::Builder::default()
         .on_window_event(|window, event| {
@@ -48,33 +47,6 @@ pub fn run() {
                 tauri::WindowEvent::CloseRequested { api, .. } => {
                     api.prevent_close();
                     let _ = window.hide();
-                }
-                // A mode switch destroys the window on purpose. Rebuild it in
-                // the same process (posted to the loop, so the GTK teardown
-                // finishes first): the Tauri context, hotkeys, tray, models
-                // and chat state all stay warm — only the window and webview
-                // are replaced.
-                tauri::WindowEvent::Destroyed if window.label() == "main" => {
-                    if let Some(mode) = crate::window::pending_switch() {
-                        let app = window.app_handle().clone();
-                        // Defer: on the main thread `run_on_main_thread`
-                        // executes inline, i.e. in the middle of the GTK
-                        // teardown. Posting from a helper thread queues the
-                        // task on the next loop iteration instead.
-                        std::thread::spawn(move || {
-                            let inner = app.clone();
-                            if let Err(e) = app.run_on_main_thread(move || {
-                                recreate_main_window(inner, mode);
-                            }) {
-                                crate::window::finish_switch();
-                                tracing::error!(
-                                    ?e,
-                                    "overlay: could not queue the window recreation, exiting"
-                                );
-                                app.exit(1);
-                            }
-                        });
-                    }
                 }
                 _ => {}
             }
@@ -97,14 +69,7 @@ pub fn run() {
                     if event.state() != ShortcutState::Pressed {
                         return;
                     }
-                    shortcuts::dispatch(
-                        app,
-                        shortcut,
-                        &toggle_input,
-                        &vision_region,
-                        &overlay,
-                        &toggle_window,
-                    );
+                    shortcuts::dispatch(app, shortcut, &toggle_input, &vision_region);
                 })
                 .build(),
         )
@@ -198,7 +163,6 @@ pub fn run() {
             crate::boot::avatar_corner_pending,
             crate::boot::avatar_corner_done,
             commands::overlay::set_input_region,
-            commands::window::set_window_overlay,
             commands::window::window_overlay_info,
             commands::window::overlay_keyboard_on_demand,
             commands::window::agent_report,
@@ -283,41 +247,8 @@ pub fn run() {
             commands::intent::intent_load,
             commands::intent::intent_classify_debug,
         ])
-        .setup(move |app| startup::run(app, toggle_input, vision_region, overlay, toggle_window))
+        .setup(move |app| startup::run(app, toggle_input, vision_region))
         .build(tauri::generate_context!())
         .expect("error while building the tauri application")
-        .run(|_app, event| {
-            // Destroying the last window during a mode switch must not end the
-            // process: the replacement window is created right afterwards
-            // (see the `Destroyed` handler above). A real `app.exit(code)`
-            // carries a code and is never prevented.
-            if let tauri::RunEvent::ExitRequested { api, code, .. } = &event {
-                if code.is_none() && crate::window::switch_in_flight() {
-                    api.prevent_exit();
-                }
-            }
-        });
-}
-
-/// Build the replacement window after a mode switch destroyed the old one.
-///
-/// Runs on the main thread (posted by the `Destroyed` handler). If the window
-/// cannot be built, exit: without a window the app is invisible and cannot be
-/// driven, and a second process would collide with the single-instance lock.
-fn recreate_main_window(app: tauri::AppHandle, mode: crate::window::OverlayMode) {
-    let result = crate::window::create_main_window(&app, mode);
-    let rebuild_ms = crate::window::finish_switch();
-    match result {
-        Ok(_) => {
-            tracing::info!(
-                ?mode,
-                rebuild_ms = rebuild_ms.unwrap_or_default(),
-                "overlay: window recreated, the app stayed alive"
-            );
-        }
-        Err(e) => {
-            tracing::error!(?e, ?mode, "overlay: window recreation failed, exiting");
-            app.exit(1);
-        }
-    }
+        .run(|_app, _event| {});
 }

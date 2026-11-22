@@ -100,7 +100,6 @@ function snapshot(): unknown {
     vw: window.innerWidth,
     vh: window.innerHeight,
     dpr: window.devicePixelRatio,
-    overlay: localStorage.getItem("komorebi.overlay_mode"),
     /** Live2D mount: `readyAtMs` is ms since this page started. */
     avatar: avatarInfo(),
     focus: focusInfo(),

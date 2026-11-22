@@ -12,9 +12,6 @@
 //! ```text
 //! frame                 capture one frame now
 //! watch <ms>            capture every <ms> ms (0 = off)
-//! overlay               set the window to overlay mode
-//! normal                set the window to a normal window
-//! toggle                cycle overlay <-> normal
 //! eval <js>             run JS in the webview (drives the real UI)
 //! ```
 //!
@@ -22,7 +19,7 @@
 //! `crate::window::frame`), downscaled to at most `MAX_W` px wide and
 //! flattened over a checkerboard so transparent (click-through) areas are
 //! visible. `state.json` carries the same frame as text: window geometry,
-//! effective mode, OS input rects and the frontend's UI snapshot.
+//! the selected surface backend, OS input rects and the frontend's UI snapshot.
 
 use tauri::AppHandle;
 
@@ -49,12 +46,12 @@ mod imp {
 
     use tauri::{AppHandle, Manager, WebviewWindow};
 
-    use crate::window::{capture_frame, current_mode, OverlayMode};
+    use crate::window::capture_frame;
 
     const POLL_MS: u64 = 250;
     /// Wait for a repaint before an on-demand capture. A snapshot taken in the
-    /// same tick as a mode change or an `eval` can still show the old frame,
-    /// which reads as "the click did nothing".
+    /// same tick as an `eval` can still show the old frame, which reads as
+    /// "the click did nothing".
     const SETTLE_MS: u64 = 300;
     /// Frames are tokenized by area; keep them small by default.
     const MAX_W: u32 = 480;
@@ -147,12 +144,6 @@ mod imp {
                 tracing::info!("agent frame: window shown");
                 shoot(win, dir, seq, SETTLE_MS);
             }
-            "overlay" => set_mode(win, dir, OverlayMode::Overlay, seq),
-            "normal" => set_mode(win, dir, OverlayMode::Normal, seq),
-            "toggle" => {
-                let next = crate::window::toggle(current_mode());
-                set_mode(win, dir, next, seq);
-            }
             other => tracing::warn!(cmd = other, "agent frame: unknown command"),
         }
     }
@@ -183,18 +174,6 @@ mod imp {
                 "agent frame: webview focus state"
             );
         });
-    }
-
-    fn set_mode(win: &WebviewWindow, dir: &Path, mode: OverlayMode, seq: &mut u32) {
-        // Exercise the same path as the real UI: a window-type change
-        // recreates the window in-process, so the old handle is gone and the
-        // next frame command captures the new one.
-        let recreate = crate::window::needs_recreate(mode);
-        let effective = crate::commands::window::switch_mode(win, mode);
-        tracing::info!(?effective, recreate, "agent frame: mode applied");
-        if !recreate {
-            shoot(win, dir, seq, SETTLE_MS);
-        }
     }
 
     fn shoot(win: &WebviewWindow, dir: &Path, seq: &mut u32, settle_ms: u64) {
@@ -268,7 +247,8 @@ mod imp {
 
         serde_json::json!({
             "t_ms": started.elapsed().as_millis() as u64,
-            "mode": current_mode(),
+            "mode": "overlay",
+            "backend": crate::platform::surface().name(),
             "window": {
                 "label": win.label(),
                 "visible": win.is_visible().unwrap_or(false),

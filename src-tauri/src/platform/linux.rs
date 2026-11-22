@@ -8,8 +8,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::WebviewWindow;
 
-use super::{warn_layer_shell_once, InputRect, Surface, SurfaceInfo};
-use crate::window::OverlayMode;
+use super::{fill_monitor, warn_layer_shell_once, InputRect, Surface, SurfaceInfo};
 
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 
@@ -25,40 +24,29 @@ impl Surface for LayerShellSurface {
     fn info(&self) -> SurfaceInfo {
         SurfaceInfo {
             overlay_supported: true,
-            layer_shell_supported: true,
-            layer_shell_active: ACTIVE.load(Ordering::Relaxed),
         }
     }
 
-    fn init(&self, window: &WebviewWindow, mode: OverlayMode) {
-        if !matches!(mode, OverlayMode::Overlay) {
-            ACTIVE.store(false, Ordering::Relaxed);
-            return;
-        }
-
+    fn init(&self, window: &WebviewWindow) {
         if attach(window) {
             ACTIVE.store(true, Ordering::Relaxed);
         } else {
             ACTIVE.store(false, Ordering::Relaxed);
             tracing::warn!(
                 "overlay: gtk-layer-shell could not attach (window already \
-                 mapped?); falling back to always-on-top"
+                 mapped?); falling back to a sized always-on-top window"
             );
         }
     }
 
-    fn apply(&self, _window: &WebviewWindow, mode: OverlayMode) -> OverlayMode {
-        match mode {
-            OverlayMode::Normal => OverlayMode::Normal,
-            OverlayMode::Overlay => {
-                if ACTIVE.load(Ordering::Relaxed) {
-                    // Anchored to every edge: it already covers the monitor.
-                    return OverlayMode::Overlay;
-                }
-                warn_layer_shell_once();
-                OverlayMode::Overlay
-            }
+    fn apply(&self, window: &WebviewWindow) {
+        if ACTIVE.load(Ordering::Relaxed) {
+            // Anchored to every edge: it already covers the monitor.
+            tracing::info!("overlay: layer surface covers the monitor (no action needed)");
+            return;
         }
+        warn_layer_shell_once();
+        fill_monitor(window);
     }
 
     fn set_input_region(&self, window: &WebviewWindow, rects: &[InputRect]) -> tauri::Result<bool> {
@@ -72,6 +60,7 @@ impl Surface for LayerShellSurface {
         };
         if gtk_layer_shell::is_layer_window(&gw) {
             gtk_layer_shell::set_keyboard_mode(&gw, gtk_layer_shell::KeyboardMode::OnDemand);
+            tracing::info!("overlay: keyboard mode switched to OnDemand after pointer input");
         }
     }
 }
@@ -94,6 +83,7 @@ fn attach(window: &WebviewWindow) -> bool {
     // it by the compositor as soon as it appears. The page asks for OnDemand
     // on its first pointer event instead (see `allow_keyboard`).
     gtk_layer_shell::set_keyboard_mode(&gw, gtk_layer_shell::KeyboardMode::None);
+    tracing::info!("overlay: keyboard mode set to None before map");
     for edge in [
         gtk_layer_shell::Edge::Left,
         gtk_layer_shell::Edge::Right,

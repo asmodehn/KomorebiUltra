@@ -1,15 +1,16 @@
-//! Plain-window surface: today's path when there is no layer shell.
+//! Plain-window surface: the fallback when a layer shell is unavailable.
 //!
-//! On Linux that is an always-on-top window, an opt-in X11 hint stub, and the
-//! GTK input shape; elsewhere Tauri's own frontmost/maximize behaviour is the
-//! whole path. No new backend behaviour is introduced here.
+//! On Linux that is a monitor-sized always-on-top window, an opt-in X11 hint
+//! stub, and the GTK input shape; elsewhere Tauri's own frontmost/maximize
+//! behaviour is the whole path. No new backend behaviour is introduced here.
+//! `KOMOREBI_START_MODE=normal` selects this surface for one dev run.
 
 use tauri::WebviewWindow;
 
 use super::{InputRect, Surface, SurfaceInfo};
-use crate::window::OverlayMode;
 
-/// The fallback surface selected whenever a Wayland layer shell is unavailable.
+/// The fallback surface selected whenever a Wayland layer shell is unavailable
+/// or the dev pin asks for it.
 pub(crate) struct PlainSurface;
 
 impl Surface for PlainSurface {
@@ -18,36 +19,32 @@ impl Surface for PlainSurface {
     }
 
     fn info(&self) -> SurfaceInfo {
-        #[cfg(target_os = "linux")]
-        let overlay_supported = true;
-        #[cfg(not(target_os = "linux"))]
-        let overlay_supported = false;
-
         SurfaceInfo {
-            overlay_supported,
-            layer_shell_supported: false,
-            layer_shell_active: false,
+            #[cfg(target_os = "linux")]
+            overlay_supported: true,
+            #[cfg(not(target_os = "linux"))]
+            overlay_supported: false,
         }
     }
 
-    fn init(&self, _window: &WebviewWindow, _mode: OverlayMode) {}
+    fn init(&self, _window: &WebviewWindow) {}
 
-    fn apply(&self, window: &WebviewWindow, mode: OverlayMode) -> OverlayMode {
-        match mode {
-            OverlayMode::Normal => OverlayMode::Normal,
-            OverlayMode::Overlay => {
-                #[cfg(target_os = "linux")]
-                {
-                    if super::is_x11() && std::env::var_os("KOMOREBI_X11_WINDOW_HINTS").is_some() {
-                        if let Some(m) = apply_x11_hints(window) {
-                            return m;
-                        }
-                    }
-                    super::warn_layer_shell_once();
-                }
-                // Native non-tiling is best-effort; the mode is not downgraded.
-                OverlayMode::Overlay
+    fn apply(&self, window: &WebviewWindow) {
+        #[cfg(target_os = "linux")]
+        {
+            if super::is_x11() && std::env::var_os("KOMOREBI_X11_WINDOW_HINTS").is_some() {
+                // X11 EWMH hints are still a stub; kept behind the opt-in until
+                // they are implemented and validated on X11.
+                let _ = window.gtk_window();
             }
+            super::warn_layer_shell_once();
+            super::fill_monitor(window);
+        }
+        // X11/Windows/macOS: the compositor positions a maximised window for
+        // us (work area), and alpha survives maximising.
+        #[cfg(not(target_os = "linux"))]
+        if let Err(e) = window.set_maximized(true) {
+            tracing::warn!(?e, "overlay: failed to maximize");
         }
     }
 
@@ -65,15 +62,4 @@ impl Surface for PlainSurface {
     }
 
     fn allow_keyboard(&self, _window: &WebviewWindow) {}
-}
-
-/// X11 hints: `_NET_WM_STATE_ABOVE`, skip taskbar/pager, `DOCK` window type.
-/// Stubbed until someone on X11 validates it; kept minimal and opt-in.
-#[cfg(target_os = "linux")]
-fn apply_x11_hints(window: &WebviewWindow) -> Option<OverlayMode> {
-    let gw = window.gtk_window().ok()?;
-    let _ = window.run_on_main_thread(move || {
-        let _ = gw;
-    });
-    Some(OverlayMode::Overlay)
 }

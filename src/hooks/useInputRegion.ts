@@ -1,7 +1,6 @@
 import { useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { modelClientRect } from "../components/Live2DCanvas/mountScene";
-import type { WindowOverlayMode } from "../api";
 
 interface InputRect {
   x: number;
@@ -46,13 +45,12 @@ function collect(): InputRect[] {
 }
 
 /**
- * The surface is overlay-like in both modes: report where the page takes
- * pointer input (the model bounds + interactive elements) so the empty stage
- * is click-through; the backend answers `false` when the region is
- * unsupported or disabled, and reporting stops. Keyed on the mode so a switch
- * re-derives the rects.
+ * Report where the page takes pointer input (the model bounds plus the
+ * interactive elements) so the empty stage stays click-through. The backend
+ * answers `false` when the region is unsupported or disabled, and reporting
+ * stops.
  */
-export function useInputRegion(mode: WindowOverlayMode): void {
+export function useInputRegion(): void {
   useEffect(() => {
     let last = "";
     let stopped = false;
@@ -69,10 +67,10 @@ export function useInputRegion(mode: WindowOverlayMode): void {
           if (!on) stop();
         })
         .catch(() => {
-          // A rejected send (window just recreated, main thread busy) is
-          // transient, so keep reporting. Stopping here would leave the last
-          // applied region in place while the UI moves under it, and clicks on
-          // the parts that moved would fall through to the desktop.
+          // A rejected send (main thread busy) is transient, so keep
+          // reporting. Stopping here would leave the last applied region in
+          // place while the UI moves under it, and clicks on the parts that
+          // moved would fall through to the desktop.
           last = "";
         });
     };
@@ -85,5 +83,5 @@ export function useInputRegion(mode: WindowOverlayMode): void {
     };
     report();
     return stop;
-  }, [mode]);
+  }, []);
 }

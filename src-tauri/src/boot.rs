@@ -1,11 +1,9 @@
 //! Per-launch state of the work the page does once after a launch.
 //!
-//! A window-type switch (overlay <-> windowed) destroys the window and reloads
-//! the page inside the same process, and the first page of a launch is thrown
-//! away by that same switch. A page therefore cannot tell a reload from a
-//! launch by itself: its own storage survives a restart, and anything it wrote
-//! before the reload is still there. So the state lives in the process, not on
-//! disk: a new process starts with every task pending.
+//! A page reload cannot tell a reload from a launch by itself: its own storage
+//! survives both, and anything it wrote before the reload is still there. So
+//! the state lives in the process, not on disk: a new process starts with every
+//! task pending.
 //!
 //! A task is marked done only once its effect is stored, so a page that dies in
 //! between leaves it pending and the next page of the same launch retries it.

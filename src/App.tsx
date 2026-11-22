@@ -37,9 +37,6 @@ import {
   sendMessage,
   setListenEnabled,
   allowOverlayKeyboard,
-  getWindowOverlayInfo,
-  setWindowOverlay,
-  type WindowOverlayMode,
   visionCaptureFull,
   visionWithImage,
   type PublicSettings,
@@ -74,9 +71,7 @@ const VIEWPORT_MARGIN = 8;
 
 export default function App() {
   // ── UI panels ──────────────────────────────────────────────────────
-  const [inputOpen, setInputOpen] = useState(true);
-  // Overlay keeps the chrome hidden until a character tap reveals it. The
-  // normal window keeps its existing `inputOpen` behaviour untouched.
+  // The overlay keeps its chrome hidden until a character tap reveals it.
   const [controlsOpen, setControlsOpen] = useState(false);
   // Bumped when the avatar stage hands a character tap to the message bar,
   // so the composer can (re)focus even though it stays mounted.
@@ -198,25 +193,15 @@ export default function App() {
     }
   }, []);
 
-  // ── Overlay mode: frontmost, covering the monitor ──────────────────────
-  // Overlay is the product default. The backend applies the remembered choice
-  // (or the pinned one) before it maps the window, so this is only the value
-  // for the first frames; the effect below adopts the effective mode.
-  const [overlayMode, setOverlayMode] = useState<WindowOverlayMode>("overlay");
-  // The window the page is running in is not necessarily the mode this launch
-  // wants until the sync below has run (a switch recreates the window and
-  // reloads the page). Placement of the character measures the stage, so it
-  // waits for this instead of assuming the boot-time geometry.
-  const [modeSettled, setModeSettled] = useState(false);
-  useInputRegion(overlayMode);
+  // ── Overlay presentation: frontmost, covering the monitor ─────────────
+  useInputRegion();
 
   // The revealed controls and the reply bubble sit next to the character's
   // drawn bounds, so they follow her drag and survive a window resize. Poll
-  // throughout overlay mode (a reply can arrive while the controls are
+  // throughout the session (a reply can arrive while the controls are
   // hidden); round to pixels so idle animation does not re-render the panels.
   const [modelRect, setModelRect] = useState<ModelRect | null>(null);
   useLayoutEffect(() => {
-    if (overlayMode !== "overlay") return;
     let timer = 0;
     const tick = () => {
       const r = modelClientRect();
@@ -246,55 +231,7 @@ export default function App() {
     };
     tick();
     return () => window.clearTimeout(timer);
-  }, [overlayMode]);
-
-  /** Single place that changes the mode in the page; the backend stores the
-   * choice when the mode is applied, so a relaunch reopens in it. */
-  const changeOverlayMode = useCallback((next: WindowOverlayMode) => {
-    if (next === "overlay") {
-      setControlsOpen(false);
-      setModelRect(null);
-    }
-    setOverlayMode(next);
   }, []);
-
-  /** Apply a requested overlay/windowed mode through the backend and sync
-   * the local state + remembered choice. Shared by the F11 and Alt+O
-   * handlers so both paths run the exact same two-mode logic (and surface
-   * backend failures instead of silently leaving stale state behind).
-   *
-   * The backend stores the choice before it replaces the window: a
-   * window-type change recreates the webview in-process, so the page reloads,
-   * and the next launch must reopen in the mode that was asked for. */
-  const applyRequestedMode = useCallback(
-    async (next: WindowOverlayMode) => {
-      changeOverlayMode(next);
-      try {
-        const eff = await setWindowOverlay(next);
-        if (eff && eff !== next) changeOverlayMode(eff);
-      } catch (err) {
-        // The invoke may never answer when the window is being replaced; the
-        // reloaded page re-reads the mode from the backend, so this is safe.
-        console.warn("komorebi: failed to apply overlay mode", next, err);
-      }
-    },
-    [changeOverlayMode],
-  );
-
-  /** F11: toggle between the two window states we offer — the overlay
-   * (frontmost, covering the monitor) and a plain windowed window. There is
-   * deliberately no third state: compositor
-   * fullscreen would lose the transparency, so "fullscreen without overlay"
-   * is not a mode we expose. */
-  const handleToggleWindow = useCallback(async () => {
-    await applyRequestedMode(overlayMode === "overlay" ? "normal" : "overlay");
-  }, [overlayMode, applyRequestedMode]);
-
-  /** Leave overlay mode outright. Overlay → normal; the window becomes
-   * draggable like a normal Komorebi window again. */
-  const handleExitOverlay = useCallback(async () => {
-    await applyRequestedMode("normal");
-  }, [applyRequestedMode]);
 
   // One place for the overlay controls' open/close side effects: hiding also
   // dismisses panels launched from the strip; opening focuses the composer.
@@ -306,30 +243,26 @@ export default function App() {
   }, []);
   const showOverlayControls = useCallback(() => {
     setControlsOpen(true);
-    setInputOpen(true);
     setInputFocusTick((n) => n + 1);
   }, []);
 
-  // Escape only hides the overlay controls. Leaving overlay mode is an
-  // explicit TopBar action, not an Escape side effect. The normal window
-  // keeps its own composer-owned Escape handling.
+  // Escape only hides the revealed controls.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Escape") return;
-      if (overlayMode !== "overlay" || !controlsOpen) return;
+      if (e.key !== "Escape" || !controlsOpen) return;
       hideOverlayControls();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [overlayMode, controlsOpen, hideOverlayControls]);
+  }, [controlsOpen, hideOverlayControls]);
 
   // A layer surface maps with KeyboardMode::None: COSMIC gives the keyboard
   // to one that asks while it appears, stealing the focus of whatever the
   // user was typing in. Ask for OnDemand on the first pointer contact with
   // the character or the UI instead - outside their rects the overlay is
-  // click-through, so no event reaches the page. The mode only needs
-  // switching once; keep listening if the IPC fails (the window may be being
-  // replaced) so a later pointer event can retry.
+  // click-through, so no event reaches the page. The keyboard mode only needs
+  // switching once; keep listening if the IPC fails so a later pointer event
+  // can retry.
   useEffect(() => {
     const stop = () => {
       window.removeEventListener("pointerdown", onPointer);
@@ -353,24 +286,13 @@ export default function App() {
   // ── Hooks (effects extracted out of App for clarity) ──────────────
   useHotkeys({
     onToggleInput: useCallback(() => {
-      if (overlayMode !== "overlay") {
-        setInputOpen((v) => !v);
-        return;
-      }
       if (controlsOpen) hideOverlayControls();
       else showOverlayControls();
-    }, [overlayMode, controlsOpen, hideOverlayControls, showOverlayControls]),
+    }, [controlsOpen, hideOverlayControls, showOverlayControls]),
     onVisionRegion: useCallback(
       () => void openPickerWithPrompt(""),
       [openPickerWithPrompt],
     ),
-    onOverlay: useCallback(async () => {
-      // Two-mode toggle (matches F11 and the move grip): fullscreen overlay
-      // ↔ windowed. `always_on_top` is an implementation detail of overlay,
-      // not a third user-facing state.
-      await applyRequestedMode(overlayMode === "overlay" ? "normal" : "overlay");
-    }, [overlayMode, applyRequestedMode]),
-    onToggleWindow: handleToggleWindow,
   });
 
   useTtsAudio({
@@ -388,33 +310,6 @@ export default function App() {
     setBubbleText,
     setUserEcho,
   });
-
-  useEffect(() => {
-    let mounted = true;
-    (async () => {
-      const info = await getWindowOverlayInfo();
-      if (!mounted) return;
-      if (!info.supported) {
-        // No overlay support: the window never changes shape, so the stage is
-        // already final and placement may proceed.
-        setModeSettled(true);
-        return;
-      }
-      // The backend has already applied the launch's mode (pinned or
-      // remembered) before the window was mapped, so the page adopts it
-      // instead of requesting a switch: asking here would mean destroying a
-      // window that is already correct, which the user sees as a flash and
-      // loses the keyboard focus to.
-      changeOverlayMode(info.mode);
-      setModeSettled(true);
-    })().catch(() => {
-      /* window mode is cosmetic: keep the in-page state on failure */
-      if (mounted) setModeSettled(true);
-    });
-    return () => {
-      mounted = false;
-    };
-  }, [changeOverlayMode]);
 
   useChatStream({
     activeIdRef,
@@ -680,22 +575,18 @@ export default function App() {
       (settings?.deepgram_enabled && settings?.has_deepgram_key),
   );
 
-  // In overlay the chrome is hidden until a tap; in a normal window both
-  // panels keep their existing placement and visibility.
-  const overlayRevealed =
-    overlayMode === "overlay" && controlsOpen && modelRect !== null;
+  // The chrome is hidden until a tap reveals it beside the character.
+  const overlayRevealed = controlsOpen && modelRect !== null;
   const showComposer =
-    overlayMode === "overlay"
-      ? overlayRevealed && !settingsOpen && !wizardOpen
-      : inputOpen && !settingsOpen && !wizardOpen;
-  const showTopBar = overlayMode !== "overlay" || overlayRevealed;
+    overlayRevealed && !settingsOpen && !wizardOpen;
+  const showTopBar = overlayRevealed;
 
   const revealStyle = (): {
     topBar: CSSProperties | undefined;
     composer: CSSProperties | undefined;
     bubble: CSSProperties | undefined;
   } => {
-    if (overlayMode !== "overlay" || !modelRect) {
+    if (!modelRect) {
       return { topBar: undefined, composer: undefined, bubble: undefined };
     }
     const vw = window.innerWidth;
@@ -782,8 +673,7 @@ export default function App() {
         zoom={settings?.avatar_zoom ?? 1}
         offsetX={settings?.avatar_offset_x ?? 0}
         offsetY={settings?.avatar_offset_y ?? 0}
-        overlayMode={overlayMode === "overlay"}
-        placementReady={modeSettled && settings !== null}
+        placementReady={settings !== null}
         onPositionSaved={refreshSettings}
         onStageTap={handleStageTap}
       />
@@ -819,10 +709,7 @@ export default function App() {
         open={showComposer}
         style={composerStyle}
         focusTick={inputFocusTick}
-        onClose={() => {
-          if (overlayMode === "overlay") setControlsOpen(false);
-          else setInputOpen(false);
-        }}
+        onClose={() => setControlsOpen(false)}
         onSubmit={handleSubmit}
         onVisionFull={handleVisionFull}
         onOpenVisionRegionPicker={(prompt) => {
@@ -875,9 +762,6 @@ export default function App() {
           showRelationshipBadge={
             (settings?.relationship_visibility ?? "indicator") !== "hidden"
           }
-          overlayMode={overlayMode}
-          onToggleOverlay={() => void handleToggleWindow()}
-          onExitOverlay={() => void handleExitOverlay()}
         />
       )}
       <RegionPicker

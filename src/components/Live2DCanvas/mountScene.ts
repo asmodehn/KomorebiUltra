@@ -78,10 +78,8 @@ export interface MountOptions {
   isDisposed: () => boolean;
   /** Called once the Live2D model is ready so the caller can re-layout. */
   onModelReady: (info: ModelInfo) => void;
-  /** Overlay mode: a character tap toggles the message bar; the reaction
-   * still plays so the tap does not feel dead. */
-  overlay?: boolean;
-  /** Overlay-mode character tap hand-off. */
+  /** A character tap toggles the message bar; the reaction still plays so
+   * the tap does not feel dead. */
   onCharacterTap?: () => void;
 }
 
@@ -96,8 +94,7 @@ export interface MountOptions {
 export async function mountLive2DScene(
   opts: MountOptions,
 ): Promise<(() => void) | null> {
-  const { container, modelUrl, width, height, isDisposed, onModelReady, overlay, onCharacterTap } =
-    opts;
+  const { container, modelUrl, width, height, isDisposed, onModelReady, onCharacterTap } = opts;
 
   const runtime = detectRuntime(modelUrl);
   const coreReady = await ensureRuntime(runtime);
@@ -419,8 +416,8 @@ export async function mountLive2DScene(
       // The canvas can be much wider than the model; a tap on empty
       // canvas is not a tap on her. With autoDensity, CSS pixels from
       // the canvas corner are stage coordinates. Checked before the
-      // overlay branch so a tap on the empty desktop area of the
-      // overlay window does not open the message bar.
+      // tap hand-off so clicking the desktop beside her does not open
+      // the message bar.
       const bounds = modelBounds();
       if (!bounds.contains(e.clientX - r.left, e.clientY - r.top)) return;
       // The zones describe parts of her body, not parts of the window:
@@ -460,11 +457,11 @@ export async function mountLive2DScene(
       // generates the line via LLM (mode-aware, multilingual) and
       // falls back to canned localized strings on timeout.
       invoke("speak_reaction", { zone }).catch(() => {});
-      // Overlay mode: the character is also the "talk to me" surface, so
-      // the same tap toggles the revealed controls. It does so in addition
-      // to the reaction above: a tap that only opened a text box read as a
-      // dead click, because she never answered it.
-      if (overlay) onCharacterTap?.();
+      // The character is also the "talk to me" surface, so the same tap
+      // toggles the revealed controls. It does so in addition to the
+      // reaction above: a tap that only opened a text box read as a dead
+      // click, because she never answered it.
+      onCharacterTap?.();
     };
     canvas.addEventListener("pointerdown", onPointerDown);
     canvas.addEventListener("pointerup", onPointerUp);

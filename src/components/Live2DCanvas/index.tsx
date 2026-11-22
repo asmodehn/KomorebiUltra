@@ -17,7 +17,6 @@ export default function Live2DCanvas({
   zoom = 1,
   offsetX = 0,
   offsetY = 0,
-  overlay = false,
   fitFraction = 0.9,
   onCharacterTap,
 }: {
@@ -30,9 +29,8 @@ export default function Live2DCanvas({
   /** Fraction of the canvas box the model occupies in its limiting
    * dimension, before `zoom`. */
   fitFraction?: number;
-  /** Overlay mode: a clean tap on the character toggles the message bar;
-   * the reaction still plays so the tap does not feel dead. */
-  overlay?: boolean;
+  /** A clean tap on the character toggles the message bar; the reaction still
+   * plays so the tap does not feel dead. */
   onCharacterTap?: () => void;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -43,7 +41,7 @@ export default function Live2DCanvas({
   const fitFractionRef = useRef(fitFraction);
   const offsetXRef = useRef(offsetX);
   const offsetYRef = useRef(offsetY);
-  // Overlay-mode tap hand-off. Kept in a ref so the mount effect does not
+  // Character-tap hand-off. Kept in a ref so the mount effect does not
   // re-run (and re-load the model) on every render.
   const onCharacterTapRef = useRef(onCharacterTap);
   useEffect(() => {
@@ -95,11 +93,10 @@ export default function Live2DCanvas({
     const container = containerRef.current;
     if (!container) return;
 
-    // A mount right after the window was recreated can lose its first asset
-    // requests: the webview's network process is still coming up while the
-    // page fires its first XHRs, and WebKit reports them as `Status 0`
-    // ("Load failed"). Give the load a few attempts with a short backoff
-    // instead of leaving the stage empty for the whole session.
+    // A fresh webview can lose its first asset requests while its network
+    // process is coming up; WebKit reports them as `Status 0` ("Load failed").
+    // Give the load a few attempts with a short backoff instead of leaving the
+    // stage empty for the whole session.
     const ATTEMPTS = 4;
     const RETRY_MS = 250;
 
@@ -117,7 +114,6 @@ export default function Live2DCanvas({
               modelRef.current = info;
               applyLayout();
             },
-            overlay,
             onCharacterTap: () => onCharacterTapRef.current?.(),
           });
         } catch (err) {
@@ -133,7 +129,7 @@ export default function Live2DCanvas({
           // Status for the dev harness: tells "the model is mounted" apart
           // from "an empty canvas exists" (the PIXI app is created before the
           // model finishes loading). `modelReadyAt` is ms since the page
-          // started, so a window switch can be measured end to end.
+          // started, so a slow mount can be measured end to end.
           container.dataset.modelReady = "1";
           container.dataset.modelReadyAt = String(Math.round(performance.now()));
           return;
@@ -155,7 +151,7 @@ export default function Live2DCanvas({
       delete container.dataset.modelReadyAt;
       if (cleanup) cleanup();
     };
-  }, [modelUrl, width, height, overlay]);
+  }, [modelUrl, width, height]);
 
   return (
     <div
@@ -164,8 +160,8 @@ export default function Live2DCanvas({
         width,
         height,
         // The canvas inside enables pointer-events itself so clicks on
-        // the avatar are captured. Clicks on transparent areas bubble
-        // up to AvatarStage for window dragging.
+        // the avatar are captured. Clicks on transparent areas are
+        // click-through; they never reach the page.
         pointerEvents: "none",
       }}
     />

@@ -5,177 +5,49 @@
 //! float on tiling compositors (Wayland layer-shell / X11 `_NET_WM_STATE`
 //! hints) or make a window ignore pointer input on Windows
 //! (`WS_EX_TRANSPARENT`) / macOS (`ignoresMouseEvents`).  Those need native
-//! code, isolated here so the rest of the app stays platform-agnostic.
+//! code, isolated in `platform/` so the rest of the app stays
+//! platform-agnostic.
 //!
-//! Modes:
-//!   - `normal`        — plain Tauri window (default, tiles on tiling WMs)
-//!   - `overlay`       — covers the monitor and stays frontmost, native
-//!     non-tiling where the platform allows it.
+//! There is one user-facing window: a frontmost, screen-covering,
+//! click-through overlay. The selected surface decides how that is realized —
+//! a Wayland layer surface where available, otherwise a plain always-on-top
+//! window. `KOMOREBI_START_MODE=normal` forces the plain surface for one dev
+//! run; it is a fallback instrument, not a second product mode, and is never
+//! persisted or switchable at runtime.
 //!
 //! Covering the monitor is *not* compositor fullscreen: fullscreen loses the
 //! surface alpha on Wayland (the window renders black despite a transparent
-//! page). On Linux the overlay is a layer-shell surface instead; elsewhere it
-//! is a maximised window. See `platform/`.
+//! page), so a layer surface anchored to every edge is used instead.
 //!
-//! A layer surface cannot become a toplevel, so switching the window *type*
-//! recreates the window: the old window is destroyed and a fresh one is built
-//! from `tauri.conf.json` inside the same process, leaving the Tauri context
-//! (and everything in it: hotkeys, tray, models, chat state) warm. See
-//! `create_main_window` and the `Destroyed` handler in `lib.rs`.
+//! The surface is prepared before the window is first mapped: gtk-layer-shell
+//! re-creates the GdkWindow and refuses a mapped widget. Mapping first and
+//! replacing the window afterwards would also let the compositor focus the
+//! wrong window and steal keys from whatever the user was typing in.
 
-use std::sync::Mutex;
-
-use serde::{Deserialize, Serialize};
 use tauri::WebviewWindow;
 
-/// Effective mode last applied, so native/debug code can report it.
-static CURRENT_MODE: Mutex<Option<OverlayMode>> = Mutex::new(None);
-
-/// A window-type change in flight: the mode the replacement must be built in,
-/// and when the switch was requested (for the timing log). The replacement is
-/// created from the `Destroyed` handler (see `lib.rs`), and the app must not
-/// exit in between.
-static PENDING_SWITCH: Mutex<Option<PendingSwitch>> = Mutex::new(None);
-
-#[derive(Clone, Copy)]
-struct PendingSwitch {
-    mode: OverlayMode,
-    started: std::time::Instant,
-}
-
-/// Effective mode of the window (defaults to `Normal` before the first apply).
-pub fn current_mode() -> OverlayMode {
-    CURRENT_MODE
-        .lock()
-        .map(|slot| slot.unwrap_or_default())
-        .unwrap_or_default()
-}
-
-/// Serialized to the frontend so it can reflect the effective mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum OverlayMode {
-    #[default]
-    Normal,
-    Overlay,
-}
-
-impl OverlayMode {
-    /// Name used in the settings store and in `KOMOREBI_START_MODE`.
-    pub fn name(self) -> &'static str {
-        match self {
-            OverlayMode::Normal => "normal",
-            OverlayMode::Overlay => "overlay",
-        }
-    }
-
-    /// Parse a stored name. `always_on_top` is the retired label for the
-    /// overlay: it never covered the monitor, so it is folded into it.
-    pub fn from_name(name: &str) -> Option<Self> {
-        match name {
-            "overlay" | "always_on_top" => Some(OverlayMode::Overlay),
-            "normal" => Some(OverlayMode::Normal),
-            _ => None,
-        }
-    }
-}
-
-/// Platform capability probe, answered by the selected surface.
+/// Whether the selected surface can present the overlay.
 pub fn overlay_supported() -> bool {
     crate::platform::surface().info().overlay_supported
 }
 
-/// Apply an overlay mode to a Tauri webview window.
+/// Prepare the window for its surface while it is still unmapped.
+pub fn prepare_surface(window: &WebviewWindow) {
+    crate::platform::surface().init(window);
+}
+
+/// Apply the overlay presentation: native coverage plus Tauri's frontmost.
 ///
-/// Returns the mode actually in effect (may be downgraded on platforms where
-/// the requested mode isn't available).
-pub fn apply_overlay(window: &WebviewWindow, mode: OverlayMode) -> OverlayMode {
-    let effective = platform_apply(window, mode);
-
-    // Tauri's own always-on-top is the cross-platform half of "frontmost".
-    // It must be set for every mode, otherwise `normal` would be a no-op
-    // because `tauri.conf.json` starts the window as `alwaysOnTop: true`.
-    let on_top = matches!(effective, OverlayMode::Overlay);
-    if let Err(e) = window.set_always_on_top(on_top) {
-        tracing::warn!(?e, on_top, "failed to set always-on-top");
+/// Called once at startup before the window is shown. There is no in-process
+/// window replacement: a layer surface cannot become a toplevel, and changing
+/// the surface means launching with a different capability or dev pin.
+pub fn apply_overlay(window: &WebviewWindow) {
+    // Keep the order from the old overlay path: Tauri's frontmost flag first,
+    // then the platform surface (which may size or attach the window).
+    if let Err(e) = window.set_always_on_top(true) {
+        tracing::warn!(?e, "failed to set always-on-top");
     }
-
-    if let Ok(mut slot) = CURRENT_MODE.lock() {
-        *slot = Some(effective);
-    }
-
-    // An overlay covers the screen. Compositor *fullscreen* would do that too,
-    // but on Wayland it loses the surface alpha (verified: the window painted
-    // black while the page snapshot stayed transparent), so fullscreen is
-    // never used.
-    if matches!(effective, OverlayMode::Overlay) {
-        if layer_shell_active() {
-            // Anchored to every edge by the compositor: nothing to do.
-            tracing::info!("overlay: layer surface covers the monitor (no action needed)");
-        } else {
-            #[cfg(target_os = "linux")]
-            fill_monitor(window);
-            // X11/Windows/macOS: the compositor positions a maximised window
-            // for us (work area), and alpha survives maximising.
-            #[cfg(not(target_os = "linux"))]
-            if let Err(e) = window.set_maximized(true) {
-                tracing::warn!(?e, "overlay: failed to maximize");
-            }
-        }
-    } else {
-        #[cfg(not(target_os = "linux"))]
-        if let Err(e) = window.set_maximized(false) {
-            tracing::warn!(?e, "overlay: failed to leave maximized");
-        }
-    }
-
-    effective
-}
-
-/// Best-effort monitor coverage when no layer surface is available: the size
-/// is honoured, the position is not (Wayland). On X11 this also moves the
-/// window to the monitor origin.
-#[cfg(target_os = "linux")]
-fn fill_monitor(window: &WebviewWindow) {
-    let Some(monitor) = window
-        .current_monitor()
-        .ok()
-        .flatten()
-        .or_else(|| window.primary_monitor().ok().flatten())
-    else {
-        tracing::warn!("overlay: no monitor to fill");
-        return;
-    };
-    let size = monitor.size();
-    let pos = monitor.position();
-    tracing::info!(
-        ?size,
-        "overlay: fill_monitor -> setting window size to monitor size"
-    );
-    if let Err(e) = window.set_size(tauri::PhysicalSize::new(size.width, size.height)) {
-        tracing::warn!(?e, "overlay: failed to resize the window to the monitor");
-    } else {
-        tracing::info!("overlay: window resized to monitor size");
-    }
-    if let Err(e) = window.set_position(tauri::PhysicalPosition::new(pos.x, pos.y)) {
-        tracing::debug!(
-            ?e,
-            "overlay: compositor ignored the window position (expected on Wayland)"
-        );
-    }
-}
-
-/// True when the selected surface already covers the screen with a layer.
-fn layer_shell_active() -> bool {
-    crate::platform::surface().info().layer_shell_active
-}
-
-/// One-time window setup that must happen before the window is first mapped:
-/// the mode decides the window type. Called by `startup` before the window is
-/// shown and by the recreation after a mode change, so the layer-surface flag
-/// always describes the current window.
-pub fn init_layer_shell_for(window: &WebviewWindow, mode: OverlayMode) {
-    crate::platform::surface().init(window, mode);
+    crate::platform::surface().apply(window);
 }
 
 /// Let the overlay take keyboard focus on demand (Wayland layer surface).
@@ -187,113 +59,9 @@ pub fn allow_keyboard(window: &WebviewWindow) {
     crate::platform::surface().allow_keyboard(window);
 }
 
-/// Whether this build/run can realize `overlay` as a Wayland layer surface.
-pub fn layer_shell_supported() -> bool {
-    crate::platform::surface().info().layer_shell_supported
-}
-
-/// True when the requested mode cannot be reached by mutating the current
-/// window: a layer surface cannot become a toplevel, and a mapped window
-/// cannot be promoted to one. Overlay is a layer surface whenever the
-/// platform supports it, so the two modes are two different window types.
-pub fn needs_recreate(mode: OverlayMode) -> bool {
-    let wants_layer_shell = matches!(mode, OverlayMode::Overlay) && layer_shell_supported();
-    wants_layer_shell != layer_shell_active()
-}
-
-/// `KOMOREBI_START_MODE`, when it names a mode (an explicit launch, which
-/// overrides the remembered choice). The legacy `always_on_top` label is
-/// folded into `overlay`: it was never a mode of its own.
-pub fn start_mode() -> Option<OverlayMode> {
-    let raw = std::env::var("KOMOREBI_START_MODE").ok()?;
-    OverlayMode::from_name(&raw).or_else(|| {
-        tracing::warn!(mode = %raw, "unknown KOMOREBI_START_MODE, ignoring");
-        None
-    })
-}
-
-/// Record the mode a replacement window should be created in. Set before the
-/// old window is destroyed; cleared by [`finish_switch`].
-pub fn request_switch(mode: OverlayMode) {
-    if let Ok(mut slot) = PENDING_SWITCH.lock() {
-        *slot = Some(PendingSwitch {
-            mode,
-            started: std::time::Instant::now(),
-        });
-    }
-}
-
-/// The mode the replacement window must be built in, if a switch is pending.
-pub fn pending_switch() -> Option<OverlayMode> {
-    PENDING_SWITCH
-        .lock()
-        .ok()
-        .and_then(|slot| slot.map(|p| p.mode))
-}
-
-/// True while a window is being replaced (nothing must exit the app then).
-pub fn switch_in_flight() -> bool {
-    pending_switch().is_some()
-}
-
-/// The switch is over (the replacement exists, or the rebuild failed): stop
-/// preventing the app from exiting. Returns how long the rebuild took.
-pub fn finish_switch() -> Option<u64> {
-    PENDING_SWITCH
-        .lock()
-        .ok()
-        .and_then(|mut slot| slot.take())
-        .map(|pending| pending.started.elapsed().as_millis() as u64)
-}
-
-/// Build the main window from `tauri.conf.json` in `mode`.
-///
-/// The window is created hidden, the layer surface is attached (or not) while
-/// it is still unmapped, the mode is applied, and only then is it shown. The
-/// Tauri app itself is untouched: hotkeys, tray, RAG index, models and chat
-/// state all survive the switch.
-///
-/// Must run on the main thread (the `Destroyed` handler posts it there).
-pub fn create_main_window(
-    app: &tauri::AppHandle,
-    mode: OverlayMode,
-) -> tauri::Result<WebviewWindow> {
-    let config = app
-        .config()
-        .app
-        .windows
-        .iter()
-        .find(|w| w.label == "main")
-        .cloned()
-        .ok_or(tauri::Error::WindowNotFound)?;
-
-    let window = tauri::WebviewWindowBuilder::from_config(app, &config)?.build()?;
-    init_layer_shell_for(&window, mode);
-    apply_overlay(&window, mode);
-    // The window exists from here on: a failing `show` is logged, not fatal.
-    if let Err(e) = window.show() {
-        tracing::warn!(?e, "overlay: could not show the recreated window");
-    }
-    Ok(window)
-}
-
-fn platform_apply(window: &WebviewWindow, mode: OverlayMode) -> OverlayMode {
-    crate::platform::surface().apply(window, mode)
-}
-
 mod frame;
 
 /// PNG of the window area (see `frame.rs`).
 pub fn capture_frame(window: &WebviewWindow) -> Result<Vec<u8>, String> {
     frame::capture(window)
-}
-
-/// Cycle between the two modes: normal ↔ overlay. `overlay` always means
-/// "frontmost + covering the monitor"; native non-tiling (layer-shell, X11
-/// hints) is best-effort on top of that and does not change the reported mode.
-pub fn toggle(current: OverlayMode) -> OverlayMode {
-    match current {
-        OverlayMode::Normal => OverlayMode::Overlay,
-        OverlayMode::Overlay => OverlayMode::Normal,
-    }
 }
