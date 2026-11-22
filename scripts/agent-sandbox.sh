@@ -299,7 +299,7 @@ app() {
     fi
     run_in setsid bash -c 'echo $$ > "$1"; shift; exec "$@"' _ \
         "$SANDBOX/app.pid" \
-        env KOMOREBI_AGENT_DIR="$AGENT_DIR" KOMOREBI_INPUT_REGION=1 \
+        env KOMOREBI_AGENT_DIR="$AGENT_DIR" \
         pnpm tauri dev "${features[@]}" \
         > "$SANDBOX/app.log" 2>&1 &
     for _ in $(seq 1 200); do

@@ -8,7 +8,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::WebviewWindow;
 
-use super::{fill_monitor, warn_layer_shell_once, InputRect, Surface, SurfaceInfo};
+use super::{fill_monitor, warn_layer_shell_once, InputRect, Surface};
 
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 
@@ -19,12 +19,6 @@ pub(crate) struct LayerShellSurface;
 impl Surface for LayerShellSurface {
     fn name(&self) -> &'static str {
         "wayland-layer-shell"
-    }
-
-    fn info(&self) -> SurfaceInfo {
-        SurfaceInfo {
-            overlay_supported: true,
-        }
     }
 
     fn init(&self, window: &WebviewWindow) {

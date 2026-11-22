@@ -163,7 +163,6 @@ pub fn run() {
             crate::boot::avatar_corner_pending,
             crate::boot::avatar_corner_done,
             commands::overlay::set_input_region,
-            commands::window::window_overlay_info,
             commands::window::overlay_keyboard_on_demand,
             commands::window::agent_report,
             // Agent

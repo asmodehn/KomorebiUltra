@@ -48,7 +48,7 @@ export default function AvatarStage({
   /** Called after a placement was persisted, so the settings panel re-reads
    * the offset it now holds instead of showing the previous launch's. */
   onPositionSaved?: () => void;
-  /** Overlay-mode character tap: toggle the revealed controls. */
+  /** A clean character tap toggles the revealed controls. */
   onStageTap?: () => void;
 }) {
   const [size, setSize] = useState(() => ({
@@ -269,9 +269,6 @@ export default function AvatarStage({
           width={W}
           height={H}
           zoom={zoom}
-          // She is furniture on the desktop, not the window's content: a
-          // third of the screen, leaving the rest to the desktop she stands on.
-          fitFraction={1 / 3}
           offsetX={offset.x}
           offsetY={offset.y}
           onCharacterTap={() => onStageTap?.()}

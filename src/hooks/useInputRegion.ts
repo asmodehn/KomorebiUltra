@@ -47,8 +47,8 @@ function collect(): InputRect[] {
 /**
  * Report where the page takes pointer input (the model bounds plus the
  * interactive elements) so the empty stage stays click-through. The backend
- * answers `false` when the region is unsupported or disabled, and reporting
- * stops.
+ * answers `false` when the platform has no click-through support, and
+ * reporting stops.
  */
 export function useInputRegion(): void {
   useEffect(() => {

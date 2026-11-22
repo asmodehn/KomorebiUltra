@@ -35,7 +35,7 @@ export interface TopBarProps {
 /**
  * Revealed control strip: routing badge, relationship badge, listen toggle,
  * auto-watch toggle, reset / downloads / settings / quit. It appears only
- * after a character tap; the window itself has no second presentation.
+ * after a character tap.
  *
  * `props.listenEnabled` is unused by the UI directly today — the actual
  * styling reads `props.listening` (true while the mic stream is live) —

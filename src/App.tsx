@@ -515,8 +515,8 @@ export default function App() {
   };
   handleSubmitRef.current = handleSubmit;
 
-  // Avatar-stage character tap (overlay mode): toggle the controls. Opening
-  // hands focus to the composer; closing also dismisses anything launched
+  // Avatar-stage character tap: toggle the controls. Opening hands focus to
+  // the composer; closing also dismisses anything launched
   // from the strip, matching Escape and the composer's own close button.
   const handleStageTap = useCallback(() => {
     if (controlsOpen) hideOverlayControls();

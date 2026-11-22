@@ -21,8 +21,8 @@ interface Props {
   onImagePrompt?: (prompt: string) => void;
   sttEnabled?: boolean;
   visionEnabled?: boolean;
-  /** Bumped by the avatar stage on overlay-mode character taps so the
-   * composer can (re)focus even while staying mounted. */
+  /** Bumped by the avatar stage on character taps so the composer can
+   * (re)focus even while staying mounted. */
   focusTick?: number;
   /** Position override used when the revealed panel is anchored to the
    * character instead of spanning the bottom of the window. */

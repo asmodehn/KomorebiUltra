@@ -17,7 +17,6 @@ export default function Live2DCanvas({
   zoom = 1,
   offsetX = 0,
   offsetY = 0,
-  fitFraction = 0.9,
   onCharacterTap,
 }: {
   modelUrl: string;
@@ -26,9 +25,6 @@ export default function Live2DCanvas({
   zoom?: number;
   offsetX?: number;
   offsetY?: number;
-  /** Fraction of the canvas box the model occupies in its limiting
-   * dimension, before `zoom`. */
-  fitFraction?: number;
   /** A clean tap on the character toggles the message bar; the reaction still
    * plays so the tap does not feel dead. */
   onCharacterTap?: () => void;
@@ -38,7 +34,6 @@ export default function Live2DCanvas({
   // tearing down the whole PIXI app + Live2D model.
   const modelRef = useRef<ModelInfo | null>(null);
   const zoomRef = useRef(zoom);
-  const fitFractionRef = useRef(fitFraction);
   const offsetXRef = useRef(offsetX);
   const offsetYRef = useRef(offsetY);
   // Character-tap hand-off. Kept in a ref so the mount effect does not
@@ -60,8 +55,9 @@ export default function Live2DCanvas({
     // between two sizes instead of settling. That is the scale flip seen while
     // dragging, when this runs on every pointermove.
     if (!(modelW > 0) || !(modelH > 0)) return;
-    const fit =
-      Math.min(canvasW / modelW, canvasH / modelH) * fitFractionRef.current;
+    // She is furniture on the desktop: a third of the screen, leaving the
+    // rest to the desktop she stands on.
+    const fit = Math.min(canvasW / modelW, canvasH / modelH) * (1 / 3);
     const scale = fit * Math.max(0.1, zoomRef.current);
     // Only write the transform when it actually changed.
     const sp = model.scale as unknown as { x: number; set: (s: number) => void };
@@ -78,13 +74,12 @@ export default function Live2DCanvas({
   // Push prop updates into refs and re-layout live.
   useEffect(() => {
     zoomRef.current = zoom;
-    fitFractionRef.current = fitFraction;
     offsetXRef.current = offsetX;
     offsetYRef.current = offsetY;
     applyLayout();
     // applyLayout is stable (closes over refs only).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [zoom, fitFraction, offsetX, offsetY]);
+  }, [zoom, offsetX, offsetY]);
 
   useEffect(() => {
     let disposed = false;

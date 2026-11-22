@@ -11,9 +11,9 @@
 //! There is one user-facing window: a frontmost, screen-covering,
 //! click-through overlay. The selected surface decides how that is realized —
 //! a Wayland layer surface where available, otherwise a plain always-on-top
-//! window. `KOMOREBI_START_MODE=normal` forces the plain surface for one dev
-//! run; it is a fallback instrument, not a second product mode, and is never
-//! persisted or switchable at runtime.
+//! window. Building without the `layer-shell` feature selects the plain
+//! surface for debugging; it is not a second product mode and cannot be
+//! changed at runtime.
 //!
 //! Covering the monitor is *not* compositor fullscreen: fullscreen loses the
 //! surface alpha on Wayland (the window renders black despite a transparent
@@ -26,11 +26,6 @@
 
 use tauri::WebviewWindow;
 
-/// Whether the selected surface can present the overlay.
-pub fn overlay_supported() -> bool {
-    crate::platform::surface().info().overlay_supported
-}
-
 /// Prepare the window for its surface while it is still unmapped.
 pub fn prepare_surface(window: &WebviewWindow) {
     crate::platform::surface().init(window);
@@ -40,10 +35,10 @@ pub fn prepare_surface(window: &WebviewWindow) {
 ///
 /// Called once at startup before the window is shown. There is no in-process
 /// window replacement: a layer surface cannot become a toplevel, and changing
-/// the surface means launching with a different capability or dev pin.
+/// the surface means building with different features or on another platform.
 pub fn apply_overlay(window: &WebviewWindow) {
-    // Keep the order from the old overlay path: Tauri's frontmost flag first,
-    // then the platform surface (which may size or attach the window).
+    // Set Tauri's frontmost flag before the platform surface, which may attach
+    // or size the window.
     if let Err(e) = window.set_always_on_top(true) {
         tracing::warn!(?e, "failed to set always-on-top");
     }

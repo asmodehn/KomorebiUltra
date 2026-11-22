@@ -1,8 +1,8 @@
 //! Global hotkey definitions and dispatch.
 //!
 //! The renderer subscribes to `hotkey:toggle-input` and
-//! `hotkey:vision-region` (see `src/hooks/useHotkeys.ts`). Window mode has no
-//! hotkey: there is one overlay presentation.
+//! `hotkey:vision-region` (see `src/hooks/useHotkeys.ts`). Neither changes the
+//! presentation: there is one overlay surface.
 
 use tauri::Emitter;
 use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut};

@@ -1,21 +1,9 @@
 //! Tauri commands for the window overlay / frontmost presentation.
 //!
 //! Delegates to `crate::window`, which isolates the platform-native code
-//! (Wayland layer-shell, X11 hints, future Windows/macOS backends).
+//! (Wayland layer-shell, future Windows/macOS backends).
 
-use serde::Serialize;
 use tauri::WebviewWindow;
-
-use crate::window::overlay_supported;
-
-/// Current overlay capability + selected surface, reflected to the frontend.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub struct OverlayInfo {
-    pub supported: bool,
-    /// Selected platform surface, for headless verification and logs.
-    pub backend: &'static str,
-}
 
 /// Let the overlay accept keyboard focus after the user has picked it.
 ///
@@ -27,14 +15,6 @@ pub struct OverlayInfo {
 #[tauri::command]
 pub fn overlay_keyboard_on_demand(window: WebviewWindow) {
     crate::window::allow_keyboard(&window);
-}
-
-#[tauri::command]
-pub fn window_overlay_info() -> OverlayInfo {
-    OverlayInfo {
-        supported: overlay_supported(),
-        backend: crate::platform::surface().name(),
-    }
 }
 
 /// Dev harness: UI snapshot pushed by the frontend (`src/agentFrame.ts`).

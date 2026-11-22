@@ -30,15 +30,12 @@ pub(crate) fn run(
     // as the default toplevel is picked up and focused by the compositor, and
     // replacing it would flash a small window past and steal the keyboard from
     // whatever the user was typing in. The surface is selected once from the
-    // OS capability and the optional `KOMOREBI_START_MODE=normal` dev pin;
-    // nothing in the page can change it at runtime.
+    // OS and the build's capabilities; nothing in the page can change it at
+    // runtime. Building without `layer-shell` is the debug switch.
     if let Some(w) = app.get_webview_window("main") {
         crate::window::prepare_surface(&w);
         crate::window::apply_overlay(&w);
-        tracing::info!(
-            backend = crate::platform::surface().name(),
-            "startup: overlay applied before mapping"
-        );
+        tracing::info!("startup: overlay applied before mapping");
     }
 
     // Phase 1: spawn the feedback-telemetry uploader. Runs even when

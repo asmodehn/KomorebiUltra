@@ -1,12 +1,12 @@
 //! Narrow platform surface for the window Komorebi presents.
 //!
-//! One backend is chosen at runtime from the OS, a dev/fallback pin and a
-//! capability probe: the selection shape Kando uses, without its Electron
-//! runtime or broad `Backend` contract. The contract has only the operations
-//! the app already calls: prepare the window before first map, apply the one
-//! overlay presentation, set the click-through rects, set the keyboard focus
-//! mode, and report capability. Desktop state, capture and simulated input are
-//! separate later ports, not methods here.
+//! One backend is chosen at startup from the OS and the build's capabilities:
+//! the selection shape Kando uses, without its Electron runtime or broad
+//! `Backend` contract. The contract has only the operations the app already
+//! calls: prepare the window before first map, apply the one overlay
+//! presentation, set the click-through rects, and set the keyboard focus mode.
+//! Desktop state, capture and simulated input are separate later ports, not
+//! methods here.
 
 use serde::Deserialize;
 use std::sync::OnceLock;
@@ -26,19 +26,10 @@ pub struct InputRect {
     pub(crate) h: i32,
 }
 
-/// Capability reported by the selected surface.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct SurfaceInfo {
-    pub(crate) overlay_supported: bool,
-}
-
 /// The narrow contract every platform surface satisfies.
 pub(crate) trait Surface: Send + Sync {
-    /// Stable name for logs and `window_overlay_info`.
+    /// Stable name for logs and the agent harness `state.json`.
     fn name(&self) -> &'static str;
-
-    /// Capability probe.
-    fn info(&self) -> SurfaceInfo;
 
     /// Prepare the window before it is first mapped (layer-shell attach).
     fn init(&self, window: &WebviewWindow);
@@ -64,33 +55,12 @@ pub(crate) fn surface() -> &'static dyn Surface {
     })
 }
 
-/// The plain surface is a dev/fallback instrument for this process only.
-/// `KOMOREBI_START_MODE=normal` pins it; nothing is persisted and there is no
-/// runtime switch back to the layer surface.
-pub(crate) fn plain_requested() -> bool {
-    static PIN: OnceLock<bool> = OnceLock::new();
-    *PIN.get_or_init(
-        || match std::env::var("KOMOREBI_START_MODE").ok().as_deref() {
-            None | Some("overlay") | Some("always_on_top") => false,
-            Some("normal") => true,
-            Some(other) => {
-                tracing::warn!(
-                    mode = %other,
-                    "unknown KOMOREBI_START_MODE, using the overlay surface"
-                );
-                false
-            }
-        },
-    )
-}
-
-/// Dev pin first, then OS and build capability: the Kando selection order,
-/// reduced to the two backends that exist today. Without the `layer-shell`
-/// feature the Linux module is not compiled and plain is the only candidate.
+/// OS and build capability: the Kando selection order, reduced to the two
+/// backends that exist today. Without the `layer-shell` feature the Linux
+/// module is not compiled and plain is the only candidate. Building without
+/// that feature is the debug switch for the plain surface; there is no runtime
+/// override and nothing is persisted.
 fn select() -> &'static dyn Surface {
-    if plain_requested() {
-        return &plain::PlainSurface;
-    }
     #[cfg(all(target_os = "linux", feature = "layer-shell"))]
     {
         if is_wayland() {
@@ -105,8 +75,8 @@ fn select() -> &'static dyn Surface {
     }
 }
 
-/// Cached Wayland session check, shared by selection and the X11 path.
-#[cfg(target_os = "linux")]
+/// Cached Wayland session check used by surface selection.
+#[cfg(all(target_os = "linux", feature = "layer-shell"))]
 pub(crate) fn is_wayland() -> bool {
     static RESULT: OnceLock<bool> = OnceLock::new();
     *RESULT.get_or_init(|| {
@@ -115,11 +85,6 @@ pub(crate) fn is_wayland() -> bool {
                 .map(|b| b.to_string_lossy().contains("wayland"))
                 .unwrap_or(false)
     })
-}
-
-#[cfg(target_os = "linux")]
-pub(crate) fn is_x11() -> bool {
-    !is_wayland()
 }
 
 /// One-shot hint when the compositor keeps tiling the overlay window.
