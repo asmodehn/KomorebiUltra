@@ -93,8 +93,8 @@ mod imp {
 
             if let Ok(text) = std::fs::read_to_string(dir.join("cmd")) {
                 let _ = std::fs::remove_file(dir.join("cmd"));
-                for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
-                    exec(&win, &dir, line, &mut seq, &mut watch_ms);
+                for command in parse_commands(&text) {
+                    exec(&win, &dir, command, &mut seq, &mut watch_ms);
                 }
             }
 
@@ -111,25 +111,66 @@ mod imp {
         }
     }
 
-    fn exec(win: &WebviewWindow, dir: &Path, line: &str, seq: &mut u32, watch_ms: &mut u64) {
+    #[derive(Debug, PartialEq)]
+    enum Command<'a> {
+        Eval(&'a str),
+        Watch(u64),
+        Frame,
+        Hide,
+        Focus,
+        Gtk,
+        Show,
+        Unknown(&'a str),
+    }
+
+    fn parse_commands(text: &str) -> Vec<Command<'_>> {
+        text.lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(parse_command)
+            .collect()
+    }
+
+    fn parse_command(line: &str) -> Command<'_> {
         if let Some(js) = line.strip_prefix("eval ") {
-            if let Err(e) = win.eval(js) {
-                tracing::warn!(?e, "agent frame: eval failed");
-            }
-            return;
+            return Command::Eval(js);
         }
         if let Some(ms) = line.strip_prefix("watch ") {
-            *watch_ms = ms.trim().parse().unwrap_or(0);
-            tracing::info!(watch_ms, "agent frame: watch interval");
-            return;
+            return Command::Watch(ms.trim().parse().unwrap_or(0));
         }
         match line {
-            "frame" => shoot(win, dir, seq, SETTLE_MS),
-            "hide" => {
+            "frame" => Command::Frame,
+            "hide" => Command::Hide,
+            "focus" => Command::Focus,
+            "gtk" => Command::Gtk,
+            "show" => Command::Show,
+            other => Command::Unknown(other),
+        }
+    }
+
+    fn exec(
+        win: &WebviewWindow,
+        dir: &Path,
+        command: Command<'_>,
+        seq: &mut u32,
+        watch_ms: &mut u64,
+    ) {
+        match command {
+            Command::Eval(js) => {
+                if let Err(e) = win.eval(js) {
+                    tracing::warn!(?e, "agent frame: eval failed");
+                }
+            }
+            Command::Watch(ms) => {
+                *watch_ms = ms;
+                tracing::info!(watch_ms, "agent frame: watch interval");
+            }
+            Command::Frame => shoot(win, dir, seq, SETTLE_MS),
+            Command::Hide => {
                 let _ = win.hide();
                 tracing::info!("agent frame: window hidden");
             }
-            "focus" => {
+            Command::Focus => {
                 // `focus: false` in tauri.conf.json makes tao create the
                 // window with accept-focus off; restore it and activate.
                 let _ = win.set_focusable(true);
@@ -138,13 +179,13 @@ mod imp {
                     Err(e) => tracing::warn!(?e, "agent frame: focus failed"),
                 }
             }
-            "gtk" => gtk_probe(win),
-            "show" => {
+            Command::Gtk => gtk_probe(win),
+            Command::Show => {
                 let _ = win.show();
                 tracing::info!("agent frame: window shown");
                 shoot(win, dir, seq, SETTLE_MS);
             }
-            other => tracing::warn!(cmd = other, "agent frame: unknown command"),
+            Command::Unknown(other) => tracing::warn!(cmd = other, "agent frame: unknown command"),
         }
     }
 
@@ -237,7 +278,7 @@ mod imp {
 
     fn state_json(win: &WebviewWindow) -> String {
         let started = STARTED.get_or_init(Instant::now);
-        let size = win.inner_size().ok();
+        let size = win.inner_size().ok().map(|s| (s.width, s.height));
         let scale = win.scale_factor().unwrap_or(1.0);
         let ui = UI_SNAPSHOT
             .lock()
@@ -245,20 +286,173 @@ mod imp {
             .and_then(|s| s.clone())
             .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
 
-        serde_json::json!({
-            "t_ms": started.elapsed().as_millis() as u64,
-            "mode": "overlay",
-            "backend": crate::platform::surface().name(),
-            "window": {
-                "label": win.label(),
-                "visible": win.is_visible().unwrap_or(false),
-                "focused": win.is_focused().unwrap_or(false),
-                "size": size.map(|s| serde_json::json!({ "w": s.width, "h": s.height })),
-                "scale": scale,
-            },
-            "input_rects": crate::commands::overlay::last_rects(),
-            "ui": ui,
+        state_value(StateSnapshot {
+            t_ms: started.elapsed().as_millis() as u64,
+            backend: crate::platform::surface().name(),
+            label: win.label(),
+            visible: win.is_visible().unwrap_or(false),
+            focused: win.is_focused().unwrap_or(false),
+            size,
+            scale,
+            rects: crate::commands::overlay::last_rects(),
+            ui,
         })
         .to_string()
+    }
+
+    struct StateSnapshot<'a> {
+        t_ms: u64,
+        backend: &'a str,
+        label: &'a str,
+        visible: bool,
+        focused: bool,
+        size: Option<(u32, u32)>,
+        scale: f64,
+        rects: Vec<(i32, i32, i32, i32)>,
+        ui: Option<serde_json::Value>,
+    }
+
+    fn state_value(s: StateSnapshot<'_>) -> serde_json::Value {
+        serde_json::json!({
+            "t_ms": s.t_ms,
+            "mode": "overlay",
+            "backend": s.backend,
+            "window": {
+                "label": s.label,
+                "visible": s.visible,
+                "focused": s.focused,
+                "size": s.size.map(|(w, h)| serde_json::json!({ "w": w, "h": h })),
+                "scale": s.scale,
+            },
+            "input_rects": s.rects,
+            "ui": s.ui,
+        })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// Given a command file with blank lines and surrounding spaces
+        /// When the harness parses its text
+        /// Then each nonblank line becomes the command it names
+        /// And unknown or differently cased lines are not treated as commands
+        #[test]
+        fn file_commands_are_newline_separated_and_exact() {
+            let commands = parse_commands(
+                "frame\n watch 2000 \n\neval document.title\nunknown\nFrame\n watch 0 \n",
+            );
+            assert_eq!(
+                commands,
+                vec![
+                    Command::Frame,
+                    Command::Watch(2000),
+                    Command::Eval("document.title"),
+                    Command::Unknown("unknown"),
+                    Command::Unknown("Frame"),
+                    Command::Watch(0),
+                ]
+            );
+        }
+
+        /// Given a frontend snapshot, a selected backend and the last OS input region
+        /// When the harness publishes its state
+        /// Then the state describes one overlay window and carries the snapshot and region unchanged
+        #[test]
+        fn state_describes_one_overlay_window() {
+            let ui = serde_json::json!({
+                "vw": 640,
+                "vh": 400,
+                "nodes": [{"tag": "button", "label": "Reset conversation", "pe": "auto"}],
+                "focus": {"tag": "input", "value": "draft"},
+                "keys": [],
+            });
+            let state = state_value(StateSnapshot {
+                t_ms: 1234,
+                backend: "plain-window",
+                label: "main",
+                visible: true,
+                focused: false,
+                size: Some((640, 400)),
+                scale: 2.0,
+                rects: vec![(10, 20, 30, 40)],
+                ui: Some(ui.clone()),
+            });
+            assert_eq!(
+                state,
+                serde_json::json!({
+                    "t_ms": 1234,
+                    "mode": "overlay",
+                    "backend": "plain-window",
+                    "window": {
+                        "label": "main",
+                        "visible": true,
+                        "focused": false,
+                        "size": {"w": 640, "h": 400},
+                        "scale": 2.0,
+                    },
+                    "input_rects": [[10, 20, 30, 40]],
+                    "ui": ui,
+                })
+            );
+        }
+
+        /// Given a harness with no frontend snapshot yet
+        /// When the harness publishes its state
+        /// Then missing values are null instead of invented data
+        /// And the surface is still reported as the one overlay mode
+        #[test]
+        fn state_without_frontend_snapshot_has_no_invented_ui() {
+            let state = state_value(StateSnapshot {
+                t_ms: 0,
+                backend: "wayland-layer-shell",
+                label: "main",
+                visible: false,
+                focused: false,
+                size: None,
+                scale: 1.0,
+                rects: vec![],
+                ui: None,
+            });
+            assert_eq!(state["mode"], "overlay");
+            assert_eq!(state["backend"], "wayland-layer-shell");
+            assert!(state["ui"].is_null());
+            assert!(state["window"]["size"].is_null());
+            assert_eq!(state["input_rects"], serde_json::json!([]));
+        }
+
+        /// Given a transparent webview frame containing one opaque control
+        /// When the harness prepares the frame for an agent
+        /// Then the PNG is at most 480 px wide with opaque checkerboard showing through transparency
+        /// And the opaque control stays visible after downscaling
+        #[test]
+        fn frame_is_downscaled_and_transparency_is_visible() {
+            let source = image::RgbaImage::from_fn(960, 480, |x, y| {
+                if (100..200).contains(&x) && (100..200).contains(&y) {
+                    image::Rgba([255, 0, 0, 255])
+                } else {
+                    image::Rgba([0, 0, 0, 0])
+                }
+            });
+            let mut png = Vec::new();
+            source
+                .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+                .unwrap();
+
+            let shrunk = shrink(&png).unwrap();
+            let frame = image::load_from_memory(&shrunk).unwrap().to_rgba8();
+
+            assert!(frame.width() <= 480);
+            assert!(frame.height() > 0);
+            assert!(frame.pixels().all(|p| p.0[3] == 255));
+            let first = frame.get_pixel(0, 0);
+            let varied = frame
+                .enumerate_pixels()
+                .any(|(x, y, p)| !(45..105).contains(&x) && !(45..105).contains(&y) && p != first);
+            assert!(varied, "transparent window area must show a checkerboard");
+            let control = frame.get_pixel(75, 75);
+            assert_eq!(control.0[3], 255);
+            assert_ne!(*control, *first);
+        }
     }
 }
