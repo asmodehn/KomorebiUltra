@@ -610,13 +610,22 @@ export default function App() {
       composerTop = modelRect.bottom + REVEAL_GAP;
       stripTop = composerTop + COMPOSER_HEIGHT + PANEL_GAP;
     } else {
-      // Neither side fits: keep the panels together on the roomier side.
-      const base =
-        roomAbove >= roomBelow
-          ? VIEWPORT_MARGIN
-          : vh - stackHeight - VIEWPORT_MARGIN;
-      composerTop = base;
-      stripTop = base + COMPOSER_HEIGHT + PANEL_GAP;
+      // Neither side fits the whole stack. Keep the composer at the top margin
+      // and pick the first strip position clear of her drawn bounds: below her,
+      // above her, or the top margin when no clear position exists.
+      composerTop = VIEWPORT_MARGIN;
+      const minStrip = composerTop + COMPOSER_HEIGHT;
+      const maxStrip = vh - TOPBAR_HEIGHT - VIEWPORT_MARGIN;
+      const overlap = (top: number) =>
+        Math.max(
+          0,
+          Math.min(top + TOPBAR_HEIGHT, modelRect.bottom) -
+            Math.max(top, modelRect.top),
+        );
+      stripTop = [
+        Math.min(Math.max(modelRect.bottom + REVEAL_GAP, minStrip), maxStrip),
+        Math.max(minStrip, modelRect.top - REVEAL_GAP - TOPBAR_HEIGHT),
+      ].reduce((best, top) => (overlap(top) < overlap(best) ? top : best));
     }
     const centredLeft = (width: number) =>
       Math.max(
