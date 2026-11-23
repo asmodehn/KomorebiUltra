@@ -20,6 +20,10 @@
 
 set -euo pipefail
 
+# This is a Wayland-only sandbox. Strip the host X display before any child
+# starts, including sway, the app, its readiness wait and the deadline watchdog.
+unset DISPLAY
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SANDBOX="$ROOT/.sandbox"
 RUNTIME="$SANDBOX/run"
@@ -169,6 +173,7 @@ app_stop() {
 env_prefix() {
     local sock
     sock="$(sway_socket)"
+    printf 'unset DISPLAY\n'
     printf 'export XDG_RUNTIME_DIR=%q\n' "$RUNTIME"
     printf 'export WAYLAND_DISPLAY=%q\n' "$(wayland_display)"
     printf 'export SWAYSOCK=%q\n' "$sock"
