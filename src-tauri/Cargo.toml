@@ -125,6 +125,14 @@ webkit2gtk = "2.0"
 # default in cairo-rs; the crate is already in the gtk 0.18 tree).
 cairo-rs = { version = "0.18", features = ["png"] }
 
+# Read-only X11 global cursor source (dev harness, opt-in). `x11-dl` loads
+# libX11 at runtime, so no link-time X11 dependency is added. `libc` supplies
+# CLOCK_MONOTONIC for observation timestamps. Both are gated to Linux here;
+# the Rust adapter is `#[cfg(target_os = "linux")]` too, so the Windows CI
+# job never compiles either one.
+x11-dl = "2.21"
+libc = "0.2"
+
 # Wayland layer-shell support (opt-in): install `libgtk-layer-shell-dev`,
 # then build with `--features layer-shell` and launch with
 # `KOMOREBI_LAYER_SHELL=1` so tiling compositors don't tile the window.

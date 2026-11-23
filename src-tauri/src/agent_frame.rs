@@ -41,7 +41,7 @@ pub fn spawn(app: AppHandle) {
 #[cfg(debug_assertions)]
 mod imp {
     use std::path::{Path, PathBuf};
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::{mpsc, Mutex, OnceLock};
     use std::time::{Duration, Instant};
 
     use tauri::{AppHandle, Manager, WebviewWindow};
@@ -49,6 +49,16 @@ mod imp {
     use crate::window::capture_frame;
 
     const POLL_MS: u64 = 250;
+    /// Global cursor sampling interval (~30 Hz). Observations are also gated
+    /// by `EMIT_GATE_MS`, so this bounds emission to at most 30 Hz.
+    #[cfg(target_os = "linux")]
+    const CURSOR_POLL_MS: u64 = 34;
+    /// A change must be this old before it becomes a new observation.
+    const EMIT_GATE_MS: u64 = 34;
+    /// Newest-last observation ring, bounded so a long session cannot grow it.
+    const MAX_OBSERVATIONS: usize = 32;
+    /// Exact source name reported in capability, records and log lines.
+    const X11_SOURCE: &str = "x11-xquerypointer";
     /// Wait for a repaint before an on-demand capture. A snapshot taken in the
     /// same tick as an `eval` can still show the old frame, which reads as
     /// "the click did nothing".
@@ -59,6 +69,165 @@ mod imp {
 
     static UI_SNAPSHOT: Mutex<Option<String>> = Mutex::new(None);
     static STARTED: OnceLock<Instant> = OnceLock::new();
+
+    /// One sample from a real cursor source. Timing is captured at sample
+    /// time, never when the harness thread happens to publish state.json.
+    struct CursorSample {
+        x: i32,
+        y: i32,
+        at_ms: u64,
+    }
+
+    /// The selected read-only source and its capability. No source is a first-
+    /// class outcome: unsupported platforms report a reason, never a position.
+    struct CursorSelection {
+        capability: CursorCapability,
+        samples: Option<mpsc::Receiver<CursorSample>>,
+    }
+
+    impl CursorSelection {
+        fn none() -> Self {
+            const REASON: &str = "no passive global pointer source selected";
+            tracing::info!("agent frame: global cursor unavailable reason={REASON}");
+            Self {
+                capability: CursorCapability::unavailable(REASON),
+                samples: None,
+            }
+        }
+    }
+
+    /// Opt-in only: the host has DISPLAY=:1 and passive polling of the
+    /// operator's display is not wanted. X11 is never auto-selected.
+    #[cfg(target_os = "linux")]
+    fn select_cursor_source() -> CursorSelection {
+        if std::env::var("KOMOREBI_CURSOR_SOURCE").as_deref() != Ok("x11") {
+            return CursorSelection::none();
+        }
+        let display = std::env::var("KOMOREBI_CURSOR_DISPLAY")
+            .or_else(|_| std::env::var("DISPLAY"))
+            .unwrap_or_default();
+        match x11::X11Cursor::open(&display) {
+            Ok(cursor) => {
+                tracing::info!("cursor source selected source={X11_SOURCE}");
+                let (tx, rx) = mpsc::channel();
+                std::thread::spawn(move || poll_cursor(cursor, tx));
+                CursorSelection {
+                    capability: CursorCapability::available(X11_SOURCE),
+                    samples: Some(rx),
+                }
+            }
+            Err(reason) => {
+                tracing::info!("cursor source unavailable source={X11_SOURCE} reason={reason}");
+                CursorSelection {
+                    capability: CursorCapability::unavailable(&reason),
+                    samples: None,
+                }
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn select_cursor_source() -> CursorSelection {
+        CursorSelection::none()
+    }
+
+    /// Absolute CLOCK_MONOTONIC milliseconds, the same clock the harness X
+    /// probe prints in its MARK lines so records can be bound to an oracle.
+    #[cfg(target_os = "linux")]
+    fn monotonic_ms() -> u64 {
+        let mut ts = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
+        (ts.tv_sec as u64).saturating_mul(1000) + (ts.tv_nsec as u64) / 1_000_000
+    }
+
+    #[cfg(target_os = "linux")]
+    fn poll_cursor(cursor: x11::X11Cursor, tx: mpsc::Sender<CursorSample>) {
+        loop {
+            if let Some((x, y)) = cursor.query() {
+                let at_ms = monotonic_ms();
+                if tx.send(CursorSample { x, y, at_ms }).is_err() {
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(CURSOR_POLL_MS));
+        }
+    }
+
+    /// Minimal read-only X11 adapter. `x11-dl` resolves libX11 at runtime;
+    /// nothing here injects input or changes the window's input shape.
+    #[cfg(target_os = "linux")]
+    mod x11 {
+        use std::ffi::CString;
+        use std::os::raw::{c_int, c_uint, c_ulong};
+
+        use x11_dl::xlib::{Display, Xlib};
+
+        pub(super) struct X11Cursor {
+            xlib: Xlib,
+            display: DisplayHandle,
+            root: c_ulong,
+        }
+
+        // The connection is used only by the polling thread that owns it.
+        struct DisplayHandle(*mut Display);
+        unsafe impl Send for DisplayHandle {}
+
+        impl X11Cursor {
+            pub(super) fn open(name: &str) -> Result<Self, String> {
+                let xlib = Xlib::open().map_err(|_| "X11 library unavailable".to_string())?;
+                let c_name = CString::new(name).map_err(|_| format!("invalid DISPLAY={name}"))?;
+                let display = unsafe { (xlib.XOpenDisplay)(c_name.as_ptr()) };
+                if display.is_null() {
+                    return Err(format!("XOpenDisplay failed for DISPLAY={name}"));
+                }
+                let root = unsafe { (xlib.XDefaultRootWindow)(display) };
+                Ok(Self {
+                    xlib,
+                    display: DisplayHandle(display),
+                    root,
+                })
+            }
+
+            /// Root-relative pointer position, matching `XQueryPointer` on the
+            /// X server. `None` means this instant could not be observed.
+            pub(super) fn query(&self) -> Option<(i32, i32)> {
+                let mut root_ret: c_ulong = 0;
+                let mut child_ret: c_ulong = 0;
+                let mut root_x: c_int = 0;
+                let mut root_y: c_int = 0;
+                let mut win_x: c_int = 0;
+                let mut win_y: c_int = 0;
+                let mut mask: c_uint = 0;
+                let ok = unsafe {
+                    (self.xlib.XQueryPointer)(
+                        self.display.0,
+                        self.root,
+                        &mut root_ret,
+                        &mut child_ret,
+                        &mut root_x,
+                        &mut root_y,
+                        &mut win_x,
+                        &mut win_y,
+                        &mut mask,
+                    )
+                };
+                if ok == 0 {
+                    None
+                } else {
+                    Some((root_x, root_y))
+                }
+            }
+        }
+
+        impl Drop for X11Cursor {
+            fn drop(&mut self) {
+                unsafe { (self.xlib.XCloseDisplay)(self.display.0) };
+            }
+        }
+    }
 
     pub(super) fn report(json: String) {
         if let Ok(mut slot) = UI_SNAPSHOT.lock() {
@@ -84,6 +253,8 @@ mod imp {
         let mut watch_ms = 0u64;
         let mut last_watch = Instant::now();
         let mut last_state = String::new();
+        let mut harness: Option<AgentFrameState> = None;
+        let mut samples: Option<mpsc::Receiver<CursorSample>> = None;
 
         loop {
             std::thread::sleep(Duration::from_millis(POLL_MS));
@@ -91,8 +262,39 @@ mod imp {
                 continue;
             };
 
+            let mut snap = snapshot(&win);
+            if harness.is_none() {
+                let selection = select_cursor_source();
+                samples = selection.samples;
+                harness = Some(AgentFrameState::new(snap, selection.capability));
+                snap = snapshot(&win);
+            }
+            let state = harness.as_mut().expect("harness initialized");
+            state.refresh(snap);
+
+            // Real-source samples are queued by the X11 poll thread and folded
+            // into the same change-only, rate-limited observation path as fake
+            // commands. Publishing stays at POLL_MS; `at` keeps sample truth.
+            if let Some(rx) = &samples {
+                while let Ok(sample) = rx.try_recv() {
+                    if state
+                        .observe(sample.x, sample.y, X11_SOURCE, sample.at_ms)
+                        .is_some()
+                    {
+                        tracing::info!(
+                            "cursor observation kind=cursor:global source={} at={} x={} y={}",
+                            X11_SOURCE,
+                            sample.at_ms,
+                            sample.x,
+                            sample.y
+                        );
+                    }
+                }
+            }
+
             if let Ok(text) = std::fs::read_to_string(dir.join("cmd")) {
                 let _ = std::fs::remove_file(dir.join("cmd"));
+                let _events = state.consume(&text);
                 for command in parse_commands(&text) {
                     exec(&win, &dir, command, &mut seq, &mut watch_ms);
                 }
@@ -103,7 +305,7 @@ mod imp {
                 shoot(&win, &dir, &mut seq, 0);
             }
 
-            let state = state_json(&win);
+            let state = state.publish().to_string();
             if state != last_state {
                 let _ = std::fs::write(dir.join("state.json"), &state);
                 last_state = state;
@@ -120,6 +322,13 @@ mod imp {
         Focus,
         Gtk,
         Show,
+        /// A read-only global pointer observation injected by the harness.
+        Cursor {
+            x: i32,
+            y: i32,
+            source: String,
+            at_ms: u64,
+        },
         Unknown(&'a str),
     }
 
@@ -137,6 +346,25 @@ mod imp {
         }
         if let Some(ms) = line.strip_prefix("watch ") {
             return Command::Watch(ms.trim().parse().unwrap_or(0));
+        }
+        if let Some(rest) = line.strip_prefix("cursor ") {
+            let mut parts = rest.split_whitespace();
+            if let (Some(x), Some(y), Some(source), Some(at), None) = (
+                parts.next(),
+                parts.next(),
+                parts.next(),
+                parts.next(),
+                parts.next(),
+            ) {
+                if let (Ok(x), Ok(y), Ok(at_ms)) = (x.parse(), y.parse(), at.parse()) {
+                    return Command::Cursor {
+                        x,
+                        y,
+                        source: source.to_string(),
+                        at_ms,
+                    };
+                }
+            }
         }
         match line {
             "frame" => Command::Frame,
@@ -185,6 +413,9 @@ mod imp {
                 tracing::info!("agent frame: window shown");
                 shoot(win, dir, seq, SETTLE_MS);
             }
+            // Cursor commands are consumed by `AgentFrameState::consume`;
+            // they never reach a window or OS input operation.
+            Command::Cursor { .. } => {}
             Command::Unknown(other) => tracing::warn!(cmd = other, "agent frame: unknown command"),
         }
     }
@@ -276,31 +507,7 @@ mod imp {
         Ok(buf)
     }
 
-    fn state_json(win: &WebviewWindow) -> String {
-        let started = STARTED.get_or_init(Instant::now);
-        let size = win.inner_size().ok().map(|s| (s.width, s.height));
-        let scale = win.scale_factor().unwrap_or(1.0);
-        let ui = UI_SNAPSHOT
-            .lock()
-            .ok()
-            .and_then(|s| s.clone())
-            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
-
-        state_value(StateSnapshot {
-            t_ms: started.elapsed().as_millis() as u64,
-            backend: crate::platform::surface().name(),
-            label: win.label(),
-            visible: win.is_visible().unwrap_or(false),
-            focused: win.is_focused().unwrap_or(false),
-            size,
-            scale,
-            rects: crate::commands::overlay::last_rects(),
-            ui,
-        })
-        .to_string()
-    }
-
-    struct StateSnapshot<'a> {
+    pub(super) struct StateSnapshot<'a> {
         t_ms: u64,
         backend: &'a str,
         label: &'a str,
@@ -312,52 +519,228 @@ mod imp {
         ui: Option<serde_json::Value>,
     }
 
-    fn state_value(s: StateSnapshot<'_>) -> serde_json::Value {
-        serde_json::json!({
-            "t_ms": s.t_ms,
-            "mode": "overlay",
-            "backend": s.backend,
-            "window": {
-                "label": s.label,
-                "visible": s.visible,
-                "focused": s.focused,
-                "size": s.size.map(|(w, h)| serde_json::json!({ "w": w, "h": h })),
-                "scale": s.scale,
-            },
-            "input_rects": s.rects,
-            "ui": s.ui,
-        })
+    fn snapshot(win: &WebviewWindow) -> StateSnapshot<'_> {
+        let started = STARTED.get_or_init(Instant::now);
+        StateSnapshot {
+            t_ms: started.elapsed().as_millis() as u64,
+            backend: crate::platform::surface().name(),
+            label: win.label(),
+            visible: win.is_visible().unwrap_or(false),
+            focused: win.is_focused().unwrap_or(false),
+            size: win.inner_size().ok().map(|s| (s.width, s.height)),
+            scale: win.scale_factor().unwrap_or(1.0),
+            rects: crate::commands::overlay::last_rects(),
+            ui: UI_SNAPSHOT
+                .lock()
+                .ok()
+                .and_then(|s| s.clone())
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()),
+        }
+    }
+
+    /// What a global cursor source can report, and why it cannot when absent.
+    /// Strings (not statics) let the no-display reason name the actual DISPLAY.
+    pub(super) struct CursorCapability {
+        available: bool,
+        source: Option<String>,
+        reason: Option<String>,
+    }
+
+    impl CursorCapability {
+        pub(super) fn unavailable(reason: &str) -> Self {
+            Self {
+                available: false,
+                source: None,
+                reason: Some(reason.to_string()),
+            }
+        }
+
+        pub(super) fn available(source: &str) -> Self {
+            Self {
+                available: true,
+                source: Some(source.to_string()),
+                reason: None,
+            }
+        }
+
+        fn value(&self) -> serde_json::Value {
+            serde_json::json!({
+                "available": self.available,
+                "source": self.source,
+                "reason": self.reason,
+            })
+        }
+    }
+
+    /// Windows reports are owned here so observation state lives with the
+    /// harness, not in a process-global sink shared between tests.
+    struct OwnedSnapshot {
+        t_ms: u64,
+        backend: String,
+        label: String,
+        visible: bool,
+        focused: bool,
+        size: Option<(u32, u32)>,
+        scale: f64,
+        rects: Vec<(i32, i32, i32, i32)>,
+        ui: Option<serde_json::Value>,
+    }
+
+    impl From<StateSnapshot<'_>> for OwnedSnapshot {
+        fn from(s: StateSnapshot<'_>) -> Self {
+            Self {
+                t_ms: s.t_ms,
+                backend: s.backend.to_string(),
+                label: s.label.to_string(),
+                visible: s.visible,
+                focused: s.focused,
+                size: s.size,
+                scale: s.scale,
+                rects: s.rects,
+                ui: s.ui,
+            }
+        }
+    }
+
+    /// The harness consumes command text and publishes the value written to
+    /// `state.json`. Cursor observations are read-only: they change no window
+    /// state and attempt no OS input.
+    pub(super) struct AgentFrameState {
+        snapshot: OwnedSnapshot,
+        cursor: CursorCapability,
+        last: Option<serde_json::Value>,
+        observations: Vec<serde_json::Value>,
+        last_at: Option<u64>,
+        last_pos: Option<(i32, i32)>,
+        input_calls: Vec<String>,
+    }
+
+    impl AgentFrameState {
+        pub(super) fn new(snapshot: StateSnapshot<'_>, cursor: CursorCapability) -> Self {
+            Self {
+                snapshot: snapshot.into(),
+                cursor,
+                last: None,
+                observations: Vec::new(),
+                last_at: None,
+                last_pos: None,
+                input_calls: Vec::new(),
+            }
+        }
+
+        pub(super) fn refresh(&mut self, snapshot: StateSnapshot<'_>) {
+            self.snapshot = snapshot.into();
+        }
+
+        pub(super) fn consume(&mut self, text: &str) -> Vec<serde_json::Value> {
+            let mut events = Vec::new();
+            for command in parse_commands(text) {
+                match command {
+                    Command::Cursor {
+                        x,
+                        y,
+                        source,
+                        at_ms,
+                    } => {
+                        if let Some(event) = self.observe(x, y, &source, at_ms) {
+                            events.push(event);
+                        }
+                    }
+                    // The only harness command that changes what receives input.
+                    Command::Focus => self.input_calls.push("focus".into()),
+                    _ => {}
+                }
+            }
+            events
+        }
+
+        fn observe(
+            &mut self,
+            x: i32,
+            y: i32,
+            source: &str,
+            at_ms: u64,
+        ) -> Option<serde_json::Value> {
+            let changed = self.last_pos != Some((x, y));
+            let settled = self
+                .last_at
+                .is_none_or(|last| at_ms.saturating_sub(last) >= EMIT_GATE_MS);
+            if !changed || !settled {
+                return None;
+            }
+            let event = serde_json::json!({
+                "kind": "cursor:global",
+                "source": source,
+                "at": at_ms,
+                "payload": { "x": x, "y": y },
+            });
+            self.last = Some(event.clone());
+            self.observations.push(event.clone());
+            if self.observations.len() > MAX_OBSERVATIONS {
+                let excess = self.observations.len() - MAX_OBSERVATIONS;
+                self.observations.drain(..excess);
+            }
+            self.last_pos = Some((x, y));
+            self.last_at = Some(at_ms);
+            Some(event)
+        }
+
+        pub(super) fn publish(&self) -> serde_json::Value {
+            let s = &self.snapshot;
+            serde_json::json!({
+                "t_ms": s.t_ms,
+                "mode": "overlay",
+                "backend": s.backend,
+                "window": {
+                    "label": s.label,
+                    "visible": s.visible,
+                    "focused": s.focused,
+                    "size": s.size.map(|(w, h)| serde_json::json!({ "w": w, "h": h })),
+                    "scale": s.scale,
+                },
+                "input_rects": s.rects,
+                "ui": s.ui,
+                "capabilities": { "cursor:global": self.cursor.value() },
+                "last_observations": { "cursor:global": self.last },
+                "observations": self.observations,
+            })
+        }
+
+        #[cfg(test)]
+        pub(super) fn input_calls(&self) -> &[String] {
+            &self.input_calls
+        }
     }
 
     #[cfg(test)]
     mod tests {
         use super::*;
 
-        /// Given a command file with blank lines and surrounding spaces
-        /// When the harness parses its text
-        /// Then each nonblank line becomes the command it names
-        /// And unknown or differently cased lines are not treated as commands
-        #[test]
-        fn file_commands_are_newline_separated_and_exact() {
-            let commands = parse_commands(
-                "frame\n watch 2000 \n\neval document.title\nunknown\nFrame\n watch 0 \n",
-            );
-            assert_eq!(
-                commands,
-                vec![
-                    Command::Frame,
-                    Command::Watch(2000),
-                    Command::Eval("document.title"),
-                    Command::Unknown("unknown"),
-                    Command::Unknown("Frame"),
-                    Command::Watch(0),
-                ]
-            );
+        // Shared fixtures for the folded + new tests.
+        const NO_SOURCE: &str = "no passive global pointer source";
+
+        fn fixture_state(cursor: CursorCapability) -> AgentFrameState {
+            AgentFrameState::new(
+                StateSnapshot {
+                    t_ms: 1234,
+                    backend: "plain-window",
+                    label: "main",
+                    visible: true,
+                    focused: false,
+                    size: Some((640, 400)),
+                    scale: 2.0,
+                    rects: vec![(10, 20, 30, 40)],
+                    ui: Some(serde_json::json!({"keys": []})),
+                },
+                cursor,
+            )
         }
 
-        /// Given a frontend snapshot, a selected backend and the last OS input region
+        // ---- T1: folded into the existing full-object state test ---------------
+        /// Given a harness with no global cursor source and a full frontend snapshot
         /// When the harness publishes its state
-        /// Then the state describes one overlay window and carries the snapshot and region unchanged
+        /// Then the state says cursor:global is unavailable with a reason and has no last record
+        /// And the window, backend, input-region and UI reports stay exactly as they are
         #[test]
         fn state_describes_one_overlay_window() {
             let ui = serde_json::json!({
@@ -367,19 +750,22 @@ mod imp {
                 "focus": {"tag": "input", "value": "draft"},
                 "keys": [],
             });
-            let state = state_value(StateSnapshot {
-                t_ms: 1234,
-                backend: "plain-window",
-                label: "main",
-                visible: true,
-                focused: false,
-                size: Some((640, 400)),
-                scale: 2.0,
-                rects: vec![(10, 20, 30, 40)],
-                ui: Some(ui.clone()),
-            });
+            let harness = AgentFrameState::new(
+                StateSnapshot {
+                    t_ms: 1234,
+                    backend: "plain-window",
+                    label: "main",
+                    visible: true,
+                    focused: false,
+                    size: Some((640, 400)),
+                    scale: 2.0,
+                    rects: vec![(10, 20, 30, 40)],
+                    ui: Some(ui.clone()),
+                },
+                CursorCapability::unavailable(NO_SOURCE),
+            );
             assert_eq!(
-                state,
+                harness.publish(),
                 serde_json::json!({
                     "t_ms": 1234,
                     "mode": "overlay",
@@ -393,32 +779,226 @@ mod imp {
                     },
                     "input_rects": [[10, 20, 30, 40]],
                     "ui": ui,
+                    "capabilities": {
+                        "cursor:global": {
+                            "available": false,
+                            "source": null,
+                            "reason": NO_SOURCE,
+                        }
+                    },
+                    "last_observations": {"cursor:global": null},
+                    "observations": [],
                 })
             );
         }
 
-        /// Given a harness with no frontend snapshot yet
+        // ---- T2: folded into the existing missing-UI state test ----------------
+        /// Given no frontend snapshot and no global cursor source (S1)
         /// When the harness publishes its state
-        /// Then missing values are null instead of invented data
-        /// And the surface is still reported as the one overlay mode
+        /// Then missing window/UI values are null, capability false carries a reason
+        /// And there is no last cursor observation to invent
         #[test]
         fn state_without_frontend_snapshot_has_no_invented_ui() {
-            let state = state_value(StateSnapshot {
-                t_ms: 0,
-                backend: "wayland-layer-shell",
-                label: "main",
-                visible: false,
-                focused: false,
-                size: None,
-                scale: 1.0,
-                rects: vec![],
-                ui: None,
-            });
+            let harness = AgentFrameState::new(
+                StateSnapshot {
+                    t_ms: 0,
+                    backend: "wayland-layer-shell",
+                    label: "main",
+                    visible: false,
+                    focused: false,
+                    size: None,
+                    scale: 1.0,
+                    rects: vec![],
+                    ui: None,
+                },
+                CursorCapability::unavailable(NO_SOURCE),
+            );
+            let state = harness.publish();
             assert_eq!(state["mode"], "overlay");
             assert_eq!(state["backend"], "wayland-layer-shell");
             assert!(state["ui"].is_null());
             assert!(state["window"]["size"].is_null());
             assert_eq!(state["input_rects"], serde_json::json!([]));
+            assert_eq!(
+                state["capabilities"]["cursor:global"],
+                serde_json::json!({"available": false, "source": null, "reason": NO_SOURCE})
+            );
+            assert!(state["last_observations"]["cursor:global"].is_null());
+        }
+
+        // ---- T3: folded into the existing command-parser test ------------------
+        /// Given the harness command file with the existing commands and one cursor line (S2)
+        /// When the harness parses its text
+        /// Then each nonblank line becomes the command it names, including cursor:global
+        /// And unknown or differently cased lines are still not treated as commands
+        #[test]
+        fn file_commands_are_newline_separated_and_exact() {
+            let commands = parse_commands(
+                "frame\n watch 2000 \n\neval document.title\ncursor 412 388 harness 1700\nunknown\nFrame\n watch 0 \n",
+            );
+            assert_eq!(
+                commands,
+                vec![
+                    Command::Frame,
+                    Command::Watch(2000),
+                    Command::Eval("document.title"),
+                    Command::Cursor {
+                        x: 412,
+                        y: 388,
+                        source: "harness".to_string(),
+                        at_ms: 1700,
+                    },
+                    Command::Unknown("unknown"),
+                    Command::Unknown("Frame"),
+                    Command::Watch(0),
+                ]
+            );
+        }
+
+        // ---- T4: new, command text in -> published state out ------------------
+        /// Given a cursor command written as text to the harness command channel (S2/S4)
+        /// When the harness consumes that text and publishes its state
+        /// Then the position appears as the last cursor:global observation with the given source and time
+        /// And the published window, input-region and UI reports are the same as before
+        /// And no OS pointer/keyboard input or focus change was attempted on that path
+        #[test]
+        fn harness_cursor_command_is_published_without_touching_input() {
+            let mut harness = fixture_state(CursorCapability::unavailable(NO_SOURCE));
+            let before = harness.publish();
+            // Guard against null-equals-null false greens on the before side.
+            assert_eq!(before["window"]["label"], "main");
+            assert_eq!(before["input_rects"], serde_json::json!([[10, 20, 30, 40]]));
+            assert_eq!(before["ui"], serde_json::json!({"keys": []}));
+
+            let events = harness.consume("cursor 412 388 harness 1700\n\n");
+            let after = harness.publish();
+
+            let expected = serde_json::json!({
+                "kind": "cursor:global",
+                "source": "harness",
+                "at": 1700,
+                "payload": {"x": 412, "y": 388},
+            });
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0], expected);
+            assert_eq!(after["last_observations"]["cursor:global"], expected);
+            assert_eq!(after["window"], before["window"]);
+            assert_eq!(after["input_rects"], before["input_rects"]);
+            assert_eq!(after["ui"], before["ui"]);
+            assert_eq!(after["backend"], before["backend"]);
+            assert_eq!(after["mode"], before["mode"]);
+            assert_eq!(after["capabilities"]["cursor:global"]["available"], false);
+            assert!(
+                harness.input_calls().is_empty(),
+                "a read-only observation must not attempt OS input or focus changes"
+            );
+        }
+
+        // ---- T5: new, change-only + 30 Hz, time supplied by the command --------
+        /// Given cursor commands with supplied times: different positions 10 ms and
+        /// 33 ms after the first emit, a later different position after 50 ms,
+        /// and a repeat of that position (S3 + contract)
+        /// When the harness consumes them
+        /// Then only the first, the after-interval change and a later change are new observations
+        /// And each record keeps the timestamp given in its command, not the wall clock
+        #[test]
+        fn cursor_emission_is_change_only_and_rate_limited() {
+            let mut harness = fixture_state(CursorCapability::unavailable(NO_SOURCE));
+
+            let first = harness.consume(
+                "cursor 412 388 harness 1000\ncursor 413 388 harness 1010\ncursor 414 388 harness 1033\n",
+            );
+            assert_eq!(first.len(), 1);
+            assert_eq!(first[0]["at"], serde_json::json!(1000));
+            assert_eq!(first[0]["payload"], serde_json::json!({"x": 412, "y": 388}));
+
+            let after_interval =
+                harness.consume("cursor 413 389 harness 1050\ncursor 413 389 harness 1100\n");
+            assert_eq!(after_interval.len(), 1);
+            assert_eq!(after_interval[0]["at"], serde_json::json!(1050));
+            assert_eq!(
+                after_interval[0]["payload"],
+                serde_json::json!({"x": 413, "y": 389})
+            );
+
+            let later = harness.consume("cursor 414 389 harness 1150\n");
+            assert_eq!(later.len(), 1);
+            assert_eq!(later[0]["at"], serde_json::json!(1150));
+
+            let state = harness.publish();
+            assert_eq!(
+                state["last_observations"]["cursor:global"]["at"],
+                serde_json::json!(1150)
+            );
+            assert_eq!(
+                state["last_observations"]["cursor:global"]["source"],
+                serde_json::json!("harness")
+            );
+        }
+
+        // ---- T6: new, observable consequence of the separate source (rule 2) ---
+        /// Given two harnesses with the same surface backend and window reports but
+        /// different cursor-source capabilities (rule 2, rule 3, S1)
+        /// When each publishes state and one consumes a cursor command
+        /// Then capability is not derived from the backend name
+        /// And a present source is reported with its name while an absent one reports a reason
+        /// And consuming an observation still attempts no input operation
+        #[test]
+        fn cursor_capability_is_separate_from_the_surface_backend() {
+            let none = fixture_state(CursorCapability::unavailable(NO_SOURCE));
+            let mut x11 = fixture_state(CursorCapability::available("fake-x11"));
+
+            let no_source = none.publish();
+            let with_source = x11.publish();
+
+            assert_eq!(with_source["backend"], no_source["backend"]);
+            assert_eq!(with_source["window"], no_source["window"]);
+            assert_eq!(with_source["input_rects"], no_source["input_rects"]);
+            assert_eq!(
+                no_source["capabilities"]["cursor:global"],
+                serde_json::json!({"available": false, "source": null, "reason": NO_SOURCE})
+            );
+            assert_eq!(
+                with_source["capabilities"]["cursor:global"],
+                serde_json::json!({"available": true, "source": "fake-x11", "reason": null})
+            );
+            assert!(no_source["last_observations"]["cursor:global"].is_null());
+            assert!(with_source["last_observations"]["cursor:global"].is_null());
+
+            let events = x11.consume("cursor 10 20 harness 2000\n");
+            assert_eq!(events.len(), 1);
+            assert_eq!(x11.publish()["backend"], no_source["backend"]);
+            assert!(x11.input_calls().is_empty());
+        }
+
+        // ---- T7: bounded, newest-last observation ring (S6) ----------------
+        /// Given 40 distinct fake observations spaced past the emit gate
+        /// When the harness consumes them and publishes state
+        /// Then the array keeps at least 16 but not all 40, in time order,
+        /// and its newest record is still the last observation.
+        #[test]
+        fn observations_are_bounded_and_newest_last() {
+            let mut harness = fixture_state(CursorCapability::unavailable(NO_SOURCE));
+            let mut lines = String::new();
+            for i in 0..40 {
+                lines.push_str(&format!("cursor {i} 300 fake {}\n", 1000 + i * 40));
+            }
+            let events = harness.consume(&lines);
+            let published = harness.publish();
+            let observations = published["observations"].as_array().expect("array");
+            let len = observations.len();
+            assert_eq!(events.len(), 40);
+            assert!(
+                (16..40).contains(&len),
+                "ring must keep at least 16 records and drop some of 40"
+            );
+            assert_eq!(observations[0]["payload"]["x"], serde_json::json!(40 - len));
+            assert_eq!(observations[len - 1]["payload"]["x"], serde_json::json!(39));
+            assert_eq!(observations[len - 1]["at"], serde_json::json!(2560));
+            assert_eq!(
+                published["last_observations"]["cursor:global"],
+                observations[len - 1]
+            );
         }
 
         /// Given a transparent webview frame containing one opaque control
