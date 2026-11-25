@@ -957,9 +957,11 @@ mod imp {
         }
 
         // ---- T2: folded into the existing missing-UI state test ----------------
-        /// Given a harness with no OS window source selected and no frontend snapshot
+        /// Given a harness with no OS window source selected, no frontend snapshot and no window row
         /// When the harness publishes its state
         /// Then window:context is unavailable with a reason and has no last record
+        /// And `acp_context.window_line` is exactly
+        ///   `- window context: unavailable reason=no passive global window source selected`
         /// And no window record is invented from process/window fallback data
         /// And missing window/UI values stay null and the cursor report stays unavailable
         ///
@@ -996,6 +998,12 @@ mod imp {
                 serde_json::json!({"available":false,"source":null,"reason":"no passive global window source selected"})
             );
             assert!(state["last_observations"]["window:context"].is_null());
+            assert_eq!(
+                state["acp_context"]["window_line"],
+                serde_json::json!(
+                    "- window context: unavailable reason=no passive global window source selected"
+                )
+            );
             assert_eq!(state["observations"], serde_json::json!([]));
         }
 
@@ -1092,8 +1100,10 @@ mod imp {
         ///   w=800, h=600, output `DP-1`, workspace `ws-3`, state `active`, source `harness`,
         ///   timestamp 1800 and trailing forbidden title/pixel/path/URL/credential tokens
         /// When the harness consumes that one command and publishes its dev state record
-        /// Then the record contains a string exactly equal to the ACP context line
-        ///   `- window context: available source=harness at=1800 id=0x2a app=org.example.Editor x=100 y=200 w=800 h=600 output=DP-1 workspace=ws-3 state=active`
+        /// Then `acp_context.window_line` is exactly the per-turn ACP context line
+        ///   `- window context: available source=harness at=1800 app=org.example.Editor x=100 y=200 w=800 h=600 state=active`
+        /// And that line equals `window_context_line` for the newest consumed row and carries no
+        ///   `id=`, `output=` or `workspace=` token
         /// And none of the five forbidden tokens appears anywhere in the published record
         /// And the newest consumed window record is still the published last window observation
         ///   while the window capability still reports that no OS source is selected
@@ -1162,12 +1172,23 @@ mod imp {
             });
             assert_eq!(ev_a, vec![a.clone()]);
             let after_a = harness.publish();
-            const ACP_WINDOW_LINE_A: &str = "- window context: available source=harness at=1800 id=0x2a app=org.example.Editor x=100 y=200 w=800 h=600 output=DP-1 workspace=ws-3 state=active";
-            let after_a_text = serde_json::to_string(&after_a).unwrap();
-            assert!(
-                after_a_text.contains(&format!("\"{ACP_WINDOW_LINE_A}\"")),
-                "published record must mirror the exact ACP window line for the consumed row"
+            const ACP_WINDOW_LINE_A: &str = "- window context: available source=harness at=1800 app=org.example.Editor x=100 y=200 w=800 h=600 state=active";
+            let line_a = after_a["acp_context"]["window_line"]
+                .as_str()
+                .expect("published ACP window line");
+            assert_eq!(
+                after_a["acp_context"]["window_line"],
+                serde_json::json!(ACP_WINDOW_LINE_A)
             );
+            assert_eq!(line_a, ACP_WINDOW_LINE_A);
+            assert_eq!(
+                line_a,
+                crate::sysctx::window_context_line(Some(harness.last_window().unwrap()))
+            );
+            assert!(!line_a.contains("id="));
+            assert!(!line_a.contains("output="));
+            assert!(!line_a.contains("workspace="));
+            let after_a_text = serde_json::to_string(&after_a).unwrap();
             assert_eq!(after_a["last_observations"]["window:context"], a);
             assert_eq!(
                 after_a["capabilities"]["window:context"],

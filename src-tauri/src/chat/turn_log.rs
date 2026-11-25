@@ -260,8 +260,9 @@ mod tests {
     use komorebi_cloud::AcpTurnRecord;
     use komorebi_router::Role;
 
-    const ACP_FIRST_TEXT_A: &str = "persona\n\ncontext\n\n- window context: available source=harness-2 at=1900 id=0x2b app=org.example.Viewer x=200 y=300 w=640 h=480 output=HDMI-1 workspace=ws-4 state=background\n\nhi";
-    const ACP_FIRST_TEXT_B: &str = "context\n\n- window context: available source=harness-2 at=1900 id=0x2b app=org.example.Viewer x=200 y=300 w=640 h=480 output=HDMI-1 workspace=ws-4 state=background\n\nhi";
+    const WINDOW_LINE: &str = "- window context: available source=harness-2 at=1900 app=org.example.Viewer x=200 y=300 w=640 h=480 state=background";
+    const ACP_FIRST_TEXT_A: &str = "persona\n\ncontext\n\n- window context: available source=harness-2 at=1900 app=org.example.Viewer x=200 y=300 w=640 h=480 state=background\n\nhi";
+    const ACP_FIRST_TEXT_B: &str = "context\n\n- window context: available source=harness-2 at=1900 app=org.example.Viewer x=200 y=300 w=640 h=480 state=background\n\nhi";
 
     fn acp_first_record() -> AcpTurnRecord {
         AcpTurnRecord {
@@ -411,9 +412,11 @@ mod tests {
     }
 
     /// Given an ACP first turn and a later turn on a reused session, each carrying a literal
-    ///   expected text, role list and count for its leading system messages
+    ///   expected text, role list and count for its leading system messages, with the bounded
+    ///   window line present in the text
     /// When each finished turn-log line is written
     /// Then the line records that exact text as top-level session_prompt_text and the literal roles and count at top level
+    /// And the window line is verbatim in both texts, with no `id=`, `output=` or `workspace=` token
     /// And the persona text is present in the first line only, while both role lists still contain the persona message
     /// And all pre-existing turn-log fields and the acp route label are unchanged (retained)
     #[test]
@@ -439,6 +442,19 @@ mod tests {
             )
             .expect("done finishes the turn");
         assert_eq!(line["session_prompt_text"], ACP_FIRST_TEXT_A);
+        assert!(line["session_prompt_text"]
+            .as_str()
+            .unwrap()
+            .contains(WINDOW_LINE));
+        for token in ["id=", "output=", "workspace="] {
+            assert!(
+                !line["session_prompt_text"]
+                    .as_str()
+                    .unwrap()
+                    .contains(token),
+                "ACP turn log must not carry {token}"
+            );
+        }
         assert_eq!(line["system_roles"], json!(["system", "system", "system"]));
         assert_eq!(line["system_message_count"], 3);
         assert_eq!(line["prompt"], "hi");
@@ -471,6 +487,19 @@ mod tests {
             )
             .expect("done finishes the later turn");
         assert_eq!(line["session_prompt_text"], ACP_FIRST_TEXT_B);
+        assert!(line["session_prompt_text"]
+            .as_str()
+            .unwrap()
+            .contains(WINDOW_LINE));
+        for token in ["id=", "output=", "workspace="] {
+            assert!(
+                !line["session_prompt_text"]
+                    .as_str()
+                    .unwrap()
+                    .contains(token),
+                "ACP turn log must not carry {token}"
+            );
+        }
         assert_eq!(line["system_roles"], json!(["system", "system", "system"]));
         assert_eq!(line["system_message_count"], 3);
         assert_eq!(line["prompt"], "hi");

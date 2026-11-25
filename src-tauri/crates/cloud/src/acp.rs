@@ -715,9 +715,9 @@ mod tests {
     // CONTRACT: send_prompt builds every session/prompt request through
     // session_prompt_request. The test below pins the builder; review checks
     // the call site because send_prompt owns a ChildStdin.
-    const WINDOW_LINE: &str = "- window context: available source=harness-2 at=1900 id=0x2b app=org.example.Viewer x=200 y=300 w=640 h=480 output=HDMI-1 workspace=ws-4 state=background";
-    const ACP_FIRST_TEXT_A: &str = "persona\n\ncontext\n\n- window context: available source=harness-2 at=1900 id=0x2b app=org.example.Viewer x=200 y=300 w=640 h=480 output=HDMI-1 workspace=ws-4 state=background\n\nhi";
-    const ACP_FIRST_TEXT_SENTINEL: &str = "persona\n\ncontext\n\n- window context: available source=harness-2 at=1900 id=0x2b app=org.example.Viewer x=200 y=300 w=640 h=480 output=HDMI-1 workspace=ws-4 state=background\n\nhi \n";
+    const WINDOW_LINE: &str = "- window context: available source=harness-2 at=1900 app=org.example.Viewer x=200 y=300 w=640 h=480 state=background";
+    const ACP_FIRST_TEXT_A: &str = "persona\n\ncontext\n\n- window context: available source=harness-2 at=1900 app=org.example.Viewer x=200 y=300 w=640 h=480 state=background\n\nhi";
+    const ACP_FIRST_TEXT_SENTINEL: &str = "persona\n\ncontext\n\n- window context: available source=harness-2 at=1900 app=org.example.Viewer x=200 y=300 w=640 h=480 state=background\n\nhi \n";
 
     fn parse(s: &str) -> Value {
         serde_json::from_str(s).unwrap()
@@ -893,23 +893,32 @@ mod tests {
         assert_eq!(without_persona.system_message_count, 1);
     }
 
-    /// Given a record text literal with a trailing space and newline,
-    ///   and the session/prompt request builder used by send_prompt
-    /// When the session/prompt request params are built from that record text
+    /// Given a first-turn record built from persona, context and window-line messages and a
+    ///   sentinel user text with a trailing space and newline
+    /// When the session/prompt request params are built from that record's text
     /// Then params.prompt[0].text is byte-identical to the record text, with no trimming or re-encoding
+    /// And the record text contains the window line verbatim
     /// And the existing session/prompt method, sessionId and prompt-part shape are unchanged (retained)
     /// And the module contract above records that send_prompt uses this seam,
     ///   which review checks because send_prompt owns a ChildStdin
     #[test]
     fn session_prompt_request_keeps_the_record_text_verbatim() {
-        let req = session_prompt_request("s1", 3, ACP_FIRST_TEXT_SENTINEL);
+        let messages = [
+            ChatMessage::system("persona"),
+            ChatMessage::system("context"),
+            ChatMessage::system(WINDOW_LINE),
+            ChatMessage::user("hi \n"),
+        ];
+        let record = AcpTurnRecord::from_messages(&messages, true);
+        let req = session_prompt_request("s1", 3, &record.session_prompt_text);
         assert_eq!(req["method"], "session/prompt");
         assert_eq!(req["params"]["sessionId"], "s1");
         assert_eq!(req["params"]["prompt"][0]["type"], "text");
         assert_eq!(
             req["params"]["prompt"][0]["text"].as_str(),
-            Some(ACP_FIRST_TEXT_SENTINEL)
+            Some(record.session_prompt_text.as_str())
         );
+        assert!(record.session_prompt_text.contains(WINDOW_LINE));
     }
 
     #[test]

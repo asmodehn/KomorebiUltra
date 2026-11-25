@@ -100,8 +100,9 @@ fn blob_like(bytes: &[u8]) -> bool {
     false
 }
 
-/// The low-risk window facts a slice may put into an ACP turn. Titles, pixels,
-/// paths, URLs and credential-like text are deliberately absent.
+/// A read-only window observation. Dev tools may read the whole record; an ACP
+/// turn carries only app, rectangle and state plus source and time. Titles,
+/// pixels, paths, URLs and credential-like text are deliberately absent.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WindowContext {
     pub id: String,
@@ -118,20 +119,13 @@ pub struct WindowContext {
 }
 
 impl WindowContext {
+    /// The bounded line an ACP turn carries. The opaque id, output and workspace
+    /// stay in the observation record; only app, rectangle, state, source and
+    /// time cross into the turn.
     fn context_line(&self) -> String {
         format!(
-            "window context: available source={} at={} id={} app={} x={} y={} w={} h={} output={} workspace={} state={}",
-            self.source,
-            self.at_ms,
-            self.id,
-            self.app,
-            self.x,
-            self.y,
-            self.w,
-            self.h,
-            self.output,
-            self.workspace,
-            self.state
+            "window context: available source={} at={} app={} x={} y={} w={} h={} state={}",
+            self.source, self.at_ms, self.app, self.x, self.y, self.w, self.h, self.state
         )
     }
 }
@@ -301,32 +295,28 @@ pub fn render_context_message() -> String {
 mod tests {
     use super::*;
 
-    /// Given a per-turn ACP context whose observation carries the same eleven low-risk fields
-    ///   but whose app is a UUID (bare and with an allowed suffix), AKIA, ASIA, a 32-hex run,
-    ///   a 40-alphanumeric run (bare and `==`-padded), a path, a URL, or a labelled title or
-    ///   pixel value
+    /// Given a per-turn ACP context with no window observation and no OS source selected
     /// When the per-turn context message is rendered
-    /// Then no `- window context: available` line is rendered and the rejected token is absent
-    /// And the named reason `INVALID_APP` is present instead
-    /// And the existing preamble, date, time, OS and trailer lines remain
-    /// And the no-observation `- window context: unavailable reason=no passive global window source selected`
-    ///   line and the normal `org.example.Editor` available line are unchanged
+    /// Then it reports exactly one window line,
+    ///   `- window context: unavailable reason=no passive global window source selected`
+    /// And the preamble, current date, current time, OS and trailer lines remain unchanged
     ///
-    /// Given the same dev harness observation (source `harness`, at 1800, id `0x2a`,
-    ///   app `org.example.Editor`, x=100, y=200, w=800, h=600, output `DP-1`,
-    ///   workspace `ws-3`, state `active`) installed in the per-turn context
-    /// When the per-turn ACP context message is rendered
-    /// Then it contains the exact line
-    ///   `- window context: available source=harness at=1800 id=0x2a app=org.example.Editor x=100 y=200 w=800 h=600 output=DP-1 workspace=ws-3 state=active`
-    ///   that the dev record's string must equal
-    /// And the existing preamble, date, time, OS and trailer lines remain
-    /// And no unavailable line is rendered while an observation is present
+    /// Given one mirror-shaped window row whose app is `org.example.Editor`, rectangle
+    ///   x=100, y=200, w=800, h=600, state `active`, source `mirror` and timestamp 1800,
+    ///   with opaque id `0x2a`, output `DP-1` and workspace `ws-3` supplied
+    /// When that row is installed through `set_window_context` and the message is rendered
+    /// Then exactly one window line appears with app, rectangle and state plus source and time,
+    ///   followed by a newline
+    /// And no `id=`, `output=` or `workspace=` token and no unavailable line appears
+    /// And the preamble, current date, current time, OS and trailer lines remain unchanged
     ///
-    /// Given a companion session with no OS window source selected and no window observation
-    /// When the per-turn context message is produced
-    /// Then window context is reported unavailable with a reason
-    /// And no window record is invented and the existing current-date, current-time and OS lines remain
-    /// And the existing trailer line remains
+    /// Given a window row whose app is a UUID (bare and with an allowed suffix), AKIA, ASIA,
+    ///   a 32-hex run, a 40-alphanumeric run (bare and `==`-padded), a path, a URL, or a
+    ///   labelled title or pixel value
+    /// When that row is installed through the same entry point and rendered
+    /// Then no available line appears, the rejected token is absent, and the one window line is
+    ///   `- window context: unavailable reason=INVALID_APP`
+    /// And the preamble, date, time, OS and trailer lines remain unchanged
     #[test]
     fn context_message_reports_no_window_source() {
         let msg = render_context_message();
@@ -339,6 +329,12 @@ mod tests {
             "- window context: unavailable reason=no passive global window source selected"
         ));
         assert!(!msg.contains("- window context: available"));
+        assert_eq!(
+            msg.lines()
+                .filter(|line| line.starts_with("- window context:"))
+                .collect::<Vec<_>>(),
+            vec!["- window context: unavailable reason=no passive global window source selected"]
+        );
 
         struct RestoreNoWindowContext;
         impl Drop for RestoreNoWindowContext {
@@ -358,15 +354,25 @@ mod tests {
             output: "DP-1".into(),
             workspace: "ws-3".into(),
             state: "active".into(),
-            source: "harness".into(),
+            source: "mirror".into(),
             at_ms: 1800,
         });
         let with_observation = render_context_message();
-        const ACP_WINDOW_LINE: &str = "- window context: available source=harness at=1800 id=0x2a app=org.example.Editor x=100 y=200 w=800 h=600 output=DP-1 workspace=ws-3 state=active";
+        const ACP_WINDOW_LINE: &str = "- window context: available source=mirror at=1800 app=org.example.Editor x=100 y=200 w=800 h=600 state=active";
         assert!(
             with_observation.contains(&format!("{ACP_WINDOW_LINE}\n")),
             "per-turn context message must render the exact window line"
         );
+        assert_eq!(
+            with_observation
+                .lines()
+                .filter(|line| line.starts_with("- window context:"))
+                .collect::<Vec<_>>(),
+            vec![ACP_WINDOW_LINE]
+        );
+        assert!(!with_observation.contains("id="));
+        assert!(!with_observation.contains("output="));
+        assert!(!with_observation.contains("workspace="));
         assert!(!with_observation.contains("- window context: unavailable"));
         assert!(with_observation
             .starts_with("User environment (facts you may reference if relevant):\n"));
@@ -411,6 +417,13 @@ mod tests {
             assert!(!msg.contains("- window context: available"), "{name}");
             assert!(!msg.contains(app), "{name}: rejected token leaked");
             assert!(msg.contains("INVALID_APP"), "{name}: named reason absent");
+            assert_eq!(
+                msg.lines()
+                    .filter(|line| line.starts_with("- window context:"))
+                    .collect::<Vec<_>>(),
+                vec!["- window context: unavailable reason=INVALID_APP"],
+                "{name}: exact window line"
+            );
             assert!(
                 msg.starts_with("User environment (facts you may reference if relevant):\n"),
                 "{name}: preamble changed"
