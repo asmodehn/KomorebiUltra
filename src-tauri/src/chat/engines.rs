@@ -76,11 +76,12 @@ pub(super) async fn stream_acp(
     messages: &[ChatMessage],
     command: &str,
 ) -> Result<String, String> {
-    let stream = AcpClient::from_command(command)
+    let (stream, record) = AcpClient::from_command(command)
         .map_err(|e| e.to_string())?
         .stream_chat(messages)
         .await
         .map_err(|e| e.to_string())?;
+    super::turn_log::record_acp(id, &record);
     drain(app, service, id, stream).await
 }
 

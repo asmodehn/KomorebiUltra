@@ -38,6 +38,44 @@ type Stdin = ChildStdin;
 type StdoutLines = Lines<BufReader<ChildStdout>>;
 type Sink = mpsc::UnboundedSender<Result<StreamEvent, CloudError>>;
 
+/// Dev-readable record of the exact text sent in one `session/prompt`.
+#[derive(Debug, Clone)]
+pub struct AcpTurnRecord {
+    pub session_prompt_text: String,
+    pub system_roles: Vec<Role>,
+    pub system_message_count: usize,
+}
+
+impl AcpTurnRecord {
+    /// Build the dev record from the same messages and persona flag the wire
+    /// renderer uses. Roles describe the leading system run, which includes
+    /// the persona even on a later turn whose prompt omits its text.
+    pub fn from_messages(messages: &[ChatMessage], include_persona: bool) -> Self {
+        let lead = messages
+            .iter()
+            .take_while(|m| m.role == Role::System)
+            .count();
+        Self {
+            session_prompt_text: turn_text(messages, include_persona),
+            system_roles: messages.iter().take(lead).map(|m| m.role).collect(),
+            system_message_count: lead,
+        }
+    }
+}
+
+/// The one `session/prompt` builder. `send_prompt` sends exactly the string the
+/// dev record holds, so a renderer change cannot desynchronise the two.
+pub fn session_prompt_request(session_id: &str, id: u64, text: &str) -> Value {
+    request(
+        id,
+        "session/prompt",
+        json!({
+            "sessionId": session_id,
+            "prompt": [{ "type": "text", "text": text }]
+        }),
+    )
+}
+
 /// Directory every session is opened in. `cwd` decides which project
 /// configuration an agent discovers (opencode reads the directory's models,
 /// agents, skills, MCP servers) and where anything it writes lands, so it is
@@ -140,7 +178,10 @@ impl AcpClient {
     /// latest user message is sent on a resumed session: the agent already
     /// holds the earlier turns. Static persona text is sent with the first
     /// prompt; fresh context (time, machine, RAG) is sent with every prompt.
-    pub async fn stream_chat(&self, messages: &[ChatMessage]) -> Result<TokenStream, CloudError> {
+    pub async fn stream_chat(
+        &self,
+        messages: &[ChatMessage],
+    ) -> Result<(TokenStream, AcpTurnRecord), CloudError> {
         std::fs::create_dir_all(&self.cwd).map_err(|e| {
             CloudError::Acp(format!(
                 "cannot create the agent workspace {}: {e}",
@@ -176,7 +217,8 @@ impl AcpClient {
         drop(guard);
 
         let id = next_id();
-        let text = turn_text(messages, !claude && !first);
+        let record = AcpTurnRecord::from_messages(messages, !claude && !first);
+        let text = record.session_prompt_text.clone();
         let (sink_tx, mut sink_rx) = mpsc::unbounded_channel();
         cmd.send(SessionCmd::Prompt {
             id,
@@ -185,12 +227,15 @@ impl AcpClient {
         })
         .map_err(|_| CloudError::Acp("agent session closed".into()))?;
 
-        Ok(Box::pin(async_stream::stream! {
-            let _cancel = CancelOnDrop(cmd, id);
-            while let Some(evt) = sink_rx.recv().await {
-                yield evt;
-            }
-        }))
+        Ok((
+            Box::pin(async_stream::stream! {
+                let _cancel = CancelOnDrop(cmd, id);
+                while let Some(evt) = sink_rx.recv().await {
+                    yield evt;
+                }
+            }),
+            record,
+        ))
     }
 }
 
@@ -429,14 +474,7 @@ async fn send_prompt(
     text: String,
     sink: Sink,
 ) -> Result<(u64, Sink), (Sink, CloudError)> {
-    let req = request(
-        id,
-        "session/prompt",
-        json!({
-            "sessionId": session_id,
-            "prompt": [{ "type": "text", "text": text }]
-        }),
-    );
+    let req = session_prompt_request(session_id, id, &text);
     match write_msg(stdin, &req).await {
         Ok(()) => Ok((id, sink)),
         Err(e) => Err((sink, e)),
@@ -674,6 +712,13 @@ fn flatten(messages: &[ChatMessage]) -> (String, String) {
 mod tests {
     use super::*;
 
+    // CONTRACT: send_prompt builds every session/prompt request through
+    // session_prompt_request. The test below pins the builder; review checks
+    // the call site because send_prompt owns a ChildStdin.
+    const WINDOW_LINE: &str = "- window context: available source=harness-2 at=1900 id=0x2b app=org.example.Viewer x=200 y=300 w=640 h=480 output=HDMI-1 workspace=ws-4 state=background";
+    const ACP_FIRST_TEXT_A: &str = "persona\n\ncontext\n\n- window context: available source=harness-2 at=1900 id=0x2b app=org.example.Viewer x=200 y=300 w=640 h=480 output=HDMI-1 workspace=ws-4 state=background\n\nhi";
+    const ACP_FIRST_TEXT_SENTINEL: &str = "persona\n\ncontext\n\n- window context: available source=harness-2 at=1900 id=0x2b app=org.example.Viewer x=200 y=300 w=640 h=480 output=HDMI-1 workspace=ws-4 state=background\n\nhi \n";
+
     fn parse(s: &str) -> Value {
         serde_json::from_str(s).unwrap()
     }
@@ -733,27 +778,138 @@ mod tests {
         assert!(agent_request(&parse(r#"{"jsonrpc":"2.0","method":"session/update"}"#)).is_none());
     }
 
+    /// Given the ACP turn record built from the existing first-turn fixture of three
+    ///   leading system messages (persona, context, window line) and one user message,
+    ///   plus a sentinel row whose user text ends in a space and a newline
+    /// When the record is built with and without the persona
+    /// Then its session_prompt_text is the exact renderer literal for that flag, including the sentinel's trailing bytes
+    /// And its system_roles are three ordered lowercase "system" labels with count three in every row
+    /// And the persona is in the text only when the renderer's flag requests it (retained renderer decision)
+    /// And both existing renderer outputs remain unchanged (retained)
+    ///
+    /// RETAINED-BEHAVIOUR PIN ONLY. Given a turn-text input that already contains a
+    ///   low-risk window-context line from the harness source
+    /// When the turn text is built with and without the persona
+    /// Then that line is preserved verbatim in both, in the existing message order
+    ///
+    /// This passes on unmodified production and does not prove that the context producer emits the line.
     #[test]
     fn first_turn_carries_persona_and_context() {
         let messages = [
             ChatMessage::system("persona"),
             ChatMessage::system("context"),
+            ChatMessage::system(WINDOW_LINE),
             ChatMessage::user("hi"),
         ];
-        assert_eq!(turn_text(&messages, true), "persona\n\ncontext\n\nhi");
-        assert_eq!(turn_text(&messages, false), "context\n\nhi");
+        assert_eq!(turn_text(&messages, true), ACP_FIRST_TEXT_A);
+        assert_eq!(
+            turn_text(&messages, false),
+            format!("context\n\n{WINDOW_LINE}\n\nhi")
+        );
+
+        let first = AcpTurnRecord::from_messages(&messages, true);
+        assert_eq!(first.session_prompt_text, ACP_FIRST_TEXT_A);
+        assert_eq!(
+            first.system_roles,
+            vec![Role::System, Role::System, Role::System]
+        );
+        assert_eq!(first.system_message_count, 3);
+
+        let later = AcpTurnRecord::from_messages(&messages, false);
+        assert_eq!(
+            later.session_prompt_text,
+            format!("context\n\n{WINDOW_LINE}\n\nhi")
+        );
+        assert_eq!(
+            later.system_roles,
+            vec![Role::System, Role::System, Role::System]
+        );
+        assert_eq!(later.system_message_count, 3);
+
+        let sentinel_messages = [
+            ChatMessage::system("persona"),
+            ChatMessage::system("context"),
+            ChatMessage::system(WINDOW_LINE),
+            ChatMessage::user("hi \n"),
+        ];
+        let sentinel = AcpTurnRecord::from_messages(&sentinel_messages, true);
+        assert_eq!(sentinel.session_prompt_text, ACP_FIRST_TEXT_SENTINEL);
+        assert_eq!(
+            sentinel.system_roles,
+            vec![Role::System, Role::System, Role::System]
+        );
+        assert_eq!(sentinel.system_message_count, 3);
     }
 
+    /// Given a later turn with fresh context and an earlier exchange, plus a turn whose
+    ///   only system message is the leading persona and whose tool result is mid-conversation
+    /// When the per-turn ACP record is built on a reused session without the persona
+    /// Then its session_prompt_text is the exact later-turn renderer literal and omits the persona and the replayed exchange
+    /// And system_roles and system_message_count still include the persona as a leading system message
+    /// And the mid-conversation system message is excluded from both roles and count
+    /// And the fresh-line and no-replay renderer output remain unchanged (retained)
+    ///
+    /// RETAINED-BEHAVIOUR PIN ONLY. Given a later turn whose fresh context already
+    ///   contains a low-risk window-context line and whose history contains an earlier exchange
+    /// When the turn text is built
+    /// Then the fresh line is preserved and the earlier exchange is still not replayed
+    ///
+    /// This passes on unmodified production and does not prove that the context producer emits the line.
     #[test]
     fn later_turns_drop_the_replayed_history() {
         let messages = [
             ChatMessage::system("persona"),
             ChatMessage::system("fresh context"),
+            ChatMessage::system(WINDOW_LINE),
             ChatMessage::user("hi"),
             ChatMessage::assistant("hello"),
             ChatMessage::user("again"),
         ];
-        assert_eq!(turn_text(&messages, false), "fresh context\n\nagain");
+        let expected = format!("fresh context\n\n{WINDOW_LINE}\n\nagain");
+        assert_eq!(turn_text(&messages, false), expected);
+
+        let record = AcpTurnRecord::from_messages(&messages, false);
+        assert_eq!(record.session_prompt_text, expected);
+        assert_eq!(
+            record.system_roles,
+            vec![Role::System, Role::System, Role::System]
+        );
+        assert_eq!(record.system_message_count, 3);
+
+        let mid = [
+            ChatMessage::system("persona"),
+            ChatMessage::user("hi"),
+            ChatMessage::system("tool result"),
+            ChatMessage::user("again"),
+        ];
+        let with_persona = AcpTurnRecord::from_messages(&mid, true);
+        assert_eq!(with_persona.session_prompt_text, "persona\n\nagain");
+        assert_eq!(with_persona.system_roles, vec![Role::System]);
+        assert_eq!(with_persona.system_message_count, 1);
+
+        let without_persona = AcpTurnRecord::from_messages(&mid, false);
+        assert_eq!(without_persona.session_prompt_text, "again");
+        assert_eq!(without_persona.system_roles, vec![Role::System]);
+        assert_eq!(without_persona.system_message_count, 1);
+    }
+
+    /// Given a record text literal with a trailing space and newline,
+    ///   and the session/prompt request builder used by send_prompt
+    /// When the session/prompt request params are built from that record text
+    /// Then params.prompt[0].text is byte-identical to the record text, with no trimming or re-encoding
+    /// And the existing session/prompt method, sessionId and prompt-part shape are unchanged (retained)
+    /// And the module contract above records that send_prompt uses this seam,
+    ///   which review checks because send_prompt owns a ChildStdin
+    #[test]
+    fn session_prompt_request_keeps_the_record_text_verbatim() {
+        let req = session_prompt_request("s1", 3, ACP_FIRST_TEXT_SENTINEL);
+        assert_eq!(req["method"], "session/prompt");
+        assert_eq!(req["params"]["sessionId"], "s1");
+        assert_eq!(req["params"]["prompt"][0]["type"], "text");
+        assert_eq!(
+            req["params"]["prompt"][0]["text"].as_str(),
+            Some(ACP_FIRST_TEXT_SENTINEL)
+        );
     }
 
     #[test]

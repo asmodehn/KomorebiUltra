@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::pin::Pin;
 
 mod acp;
-pub use acp::AcpClient;
+pub use acp::{AcpClient, AcpTurnRecord};
 
 pub const DEFAULT_MODEL: &str = "anthropic/claude-3.5-sonnet";
 const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/chat/completions";

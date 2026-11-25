@@ -9,6 +9,7 @@ use super::events::ChatEventOut;
 use super::speak::sanitize_for_tts;
 use super::ChatService;
 use crate::settings;
+use komorebi_cloud::AcpTurnRecord;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::Write;
@@ -71,6 +72,17 @@ pub(super) fn begin(app: &AppHandle<Wry>, id: &str, prompt: &str, has_image: boo
     let ts = chrono::Utc::now().to_rfc3339();
     if let Ok(mut r) = recorder().lock() {
         r.begin(id, prompt, &ts, context, now_ms());
+    }
+}
+
+/// Attaches the exact outbound ACP text to an open turn. A request that fails
+/// before this point has no record to write.
+pub(super) fn record_acp(id: &str, record: &AcpTurnRecord) {
+    if path().is_none() {
+        return;
+    }
+    if let Ok(mut r) = recorder().lock() {
+        r.record_acp(id, record);
     }
 }
 
@@ -161,9 +173,17 @@ struct Pending {
     started_ms: u64,
     first_token_ms: Option<u64>,
     streamed: String,
+    acp: Option<AcpTurnRecord>,
 }
 
 impl Recorder {
+    /// Held until Done: a failed request must not leave metadata on its line.
+    fn record_acp(&mut self, id: &str, record: &AcpTurnRecord) {
+        if let Some(p) = self.pending.get_mut(id) {
+            p.acp = Some(record.clone());
+        }
+    }
+
     fn begin(&mut self, id: &str, prompt: &str, ts: &str, context: Value, now: u64) {
         let line = json!({
             "ts": ts,
@@ -179,6 +199,7 @@ impl Recorder {
                 started_ms: now,
                 first_token_ms: None,
                 streamed: String::new(),
+                acp: None,
             },
         );
     }
@@ -203,6 +224,11 @@ impl Recorder {
             ChatEventOut::Done { id, full_text } => {
                 let mut p = self.pending.remove(id)?;
                 p.line["reply"] = json!(full_text);
+                if let Some(record) = p.acp.take() {
+                    p.line["session_prompt_text"] = json!(record.session_prompt_text);
+                    p.line["system_roles"] = json!(record.system_roles);
+                    p.line["system_message_count"] = json!(record.system_message_count);
+                }
                 Some(p.finish(now))
             }
             ChatEventOut::Error { id, message } => {
@@ -231,6 +257,19 @@ impl Pending {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use komorebi_cloud::AcpTurnRecord;
+    use komorebi_router::Role;
+
+    const ACP_FIRST_TEXT_A: &str = "persona\n\ncontext\n\n- window context: available source=harness-2 at=1900 id=0x2b app=org.example.Viewer x=200 y=300 w=640 h=480 output=HDMI-1 workspace=ws-4 state=background\n\nhi";
+    const ACP_FIRST_TEXT_B: &str = "context\n\n- window context: available source=harness-2 at=1900 id=0x2b app=org.example.Viewer x=200 y=300 w=640 h=480 output=HDMI-1 workspace=ws-4 state=background\n\nhi";
+
+    fn acp_first_record() -> AcpTurnRecord {
+        AcpTurnRecord {
+            session_prompt_text: ACP_FIRST_TEXT_A.to_string(),
+            system_roles: vec![Role::System, Role::System, Role::System],
+            system_message_count: 3,
+        }
+    }
 
     fn started(id: &str, route: &str) -> ChatEventOut {
         ChatEventOut::Started {
@@ -280,6 +319,11 @@ mod tests {
         assert_eq!(label_for(Some("acp"), &l), "acp");
     }
 
+    /// Given opted-in non-ACP turns on the skill, local and cloud routes
+    /// When each turn-log line is finished
+    /// Then ts, id, prompt, route, context, reply, streamed, first_token_ms and total_ms are unchanged (retained)
+    /// And the route-label mapping for local, cloud and skill is unchanged (retained)
+    /// And none of session_prompt_text, system_roles or system_message_count is present on any line
     #[test]
     fn records_a_turn_from_begin_to_done() {
         let mut r = Recorder::default();
@@ -313,14 +357,145 @@ mod tests {
         assert_eq!(line["first_token_ms"], 300);
         assert_eq!(line["total_ms"], 1000);
         assert!(line.get("error").is_none());
+        assert!(line.get("session_prompt_text").is_none());
+        assert!(line.get("system_roles").is_none());
+        assert!(line.get("system_message_count").is_none());
+        assert!(r.pending.is_empty());
+
+        r.begin("t2", "local prompt", "ts", json!({}), 1000);
+        assert!(r.on_event(&started("t2", "local"), 1001).is_none());
+        assert!(r.on_event(&token("t2", "local reply"), 1300).is_none());
+        let local = r
+            .on_event(
+                &ChatEventOut::Done {
+                    id: "t2".into(),
+                    full_text: "local reply".into(),
+                },
+                2000,
+            )
+            .expect("done finishes the local turn");
+        assert_eq!(local["prompt"], "local prompt");
+        assert_eq!(local["route"], "local");
+        assert_eq!(local["reply"], "local reply");
+        assert_eq!(local["streamed"], "local reply");
+        assert_eq!(local["first_token_ms"], 300);
+        assert_eq!(local["total_ms"], 1000);
+        assert!(local.get("error").is_none());
+        assert!(local.get("session_prompt_text").is_none());
+        assert!(local.get("system_roles").is_none());
+        assert!(local.get("system_message_count").is_none());
+
+        r.begin("t3", "skill prompt", "ts", json!({}), 1000);
+        assert!(r.on_event(&started("t3", "skill"), 1001).is_none());
+        assert!(r.on_event(&token("t3", "skill reply"), 1300).is_none());
+        let skill = r
+            .on_event(
+                &ChatEventOut::Done {
+                    id: "t3".into(),
+                    full_text: "skill reply".into(),
+                },
+                2000,
+            )
+            .expect("done finishes the skill turn");
+        assert_eq!(skill["prompt"], "skill prompt");
+        assert_eq!(skill["route"], "skill");
+        assert_eq!(skill["reply"], "skill reply");
+        assert_eq!(skill["streamed"], "skill reply");
+        assert_eq!(skill["first_token_ms"], 300);
+        assert_eq!(skill["total_ms"], 1000);
+        assert!(skill.get("error").is_none());
+        assert!(skill.get("session_prompt_text").is_none());
+        assert!(skill.get("system_roles").is_none());
+        assert!(skill.get("system_message_count").is_none());
         assert!(r.pending.is_empty());
     }
 
+    /// Given an ACP first turn and a later turn on a reused session, each carrying a literal
+    ///   expected text, role list and count for its leading system messages
+    /// When each finished turn-log line is written
+    /// Then the line records that exact text as top-level session_prompt_text and the literal roles and count at top level
+    /// And the persona text is present in the first line only, while both role lists still contain the persona message
+    /// And all pre-existing turn-log fields and the acp route label are unchanged (retained)
+    #[test]
+    fn records_the_exact_acp_turn_metadata() {
+        let mut r = Recorder::default();
+        let first = AcpTurnRecord {
+            session_prompt_text: ACP_FIRST_TEXT_A.to_string(),
+            system_roles: vec![Role::System, Role::System, Role::System],
+            system_message_count: 3,
+        };
+        r.begin("t1", "hi", "ts", json!({"lang": "en"}), 1000);
+        r.record_acp("t1", &first);
+        assert!(r.on_event(&started("t1", "acp"), 1001).is_none());
+        assert!(r.on_event(&token("t1", "reply "), 1300).is_none());
+        assert!(r.on_event(&token("t1", "text"), 1400).is_none());
+        let line = r
+            .on_event(
+                &ChatEventOut::Done {
+                    id: "t1".into(),
+                    full_text: "reply text".into(),
+                },
+                2000,
+            )
+            .expect("done finishes the turn");
+        assert_eq!(line["session_prompt_text"], ACP_FIRST_TEXT_A);
+        assert_eq!(line["system_roles"], json!(["system", "system", "system"]));
+        assert_eq!(line["system_message_count"], 3);
+        assert_eq!(line["prompt"], "hi");
+        assert_eq!(line["route"], "acp");
+        assert_eq!(line["context"]["lang"], "en");
+        assert_eq!(line["reply"], "reply text");
+        assert_eq!(line["streamed"], "reply text");
+        assert_eq!(line["first_token_ms"], 300);
+        assert_eq!(line["total_ms"], 1000);
+        assert!(line.get("error").is_none());
+        assert!(r.pending.is_empty());
+
+        let later = AcpTurnRecord {
+            session_prompt_text: ACP_FIRST_TEXT_B.to_string(),
+            system_roles: vec![Role::System, Role::System, Role::System],
+            system_message_count: 3,
+        };
+        r.begin("t2", "hi", "ts", json!({}), 1000);
+        r.record_acp("t2", &later);
+        assert!(r.on_event(&started("t2", "acp"), 1001).is_none());
+        assert!(r.on_event(&token("t2", "reply "), 1300).is_none());
+        assert!(r.on_event(&token("t2", "text"), 1400).is_none());
+        let line = r
+            .on_event(
+                &ChatEventOut::Done {
+                    id: "t2".into(),
+                    full_text: "reply text".into(),
+                },
+                2000,
+            )
+            .expect("done finishes the later turn");
+        assert_eq!(line["session_prompt_text"], ACP_FIRST_TEXT_B);
+        assert_eq!(line["system_roles"], json!(["system", "system", "system"]));
+        assert_eq!(line["system_message_count"], 3);
+        assert_eq!(line["prompt"], "hi");
+        assert_eq!(line["route"], "acp");
+        assert_eq!(line["reply"], "reply text");
+        assert_eq!(line["streamed"], "reply text");
+        assert_eq!(line["first_token_ms"], 300);
+        assert_eq!(line["total_ms"], 1000);
+        assert!(line.get("error").is_none());
+        assert!(r.pending.is_empty());
+    }
+
+    /// Given an ACP turn whose request fails after its record was attached, an ACP turn
+    ///   that fails before Started, and an unknown turn id with an attached record
+    /// When error events and an unknown-turn token are observed
+    /// Then no session_prompt_text, system_roles or system_message_count field is written to any line
+    /// And error/first_token_ms/reply and unknown-turn handling are unchanged (retained)
     #[test]
     fn records_errors_and_ignores_unknown_turns() {
         let mut r = Recorder::default();
+        r.record_acp("ghost", &acp_first_record());
         assert!(r.on_event(&token("ghost", "x"), 5).is_none());
         r.begin("t2", "hi", "ts", json!({}), 0);
+        assert!(r.on_event(&started("t2", "acp"), 1).is_none());
+        r.record_acp("t2", &acp_first_record());
         let line = r
             .on_event(
                 &ChatEventOut::Error {
@@ -333,6 +508,28 @@ mod tests {
         assert_eq!(line["error"], "acp agent: boom");
         assert_eq!(line["first_token_ms"], Value::Null);
         assert!(line.get("reply").is_none());
+        assert!(line.get("session_prompt_text").is_none());
+        assert!(line.get("system_roles").is_none());
+        assert!(line.get("system_message_count").is_none());
+        assert!(r.pending.is_empty());
+
+        r.begin("t3", "hi", "ts", json!({}), 0);
+        r.record_acp("t3", &acp_first_record());
+        let early = r
+            .on_event(
+                &ChatEventOut::Error {
+                    id: "t3".into(),
+                    message: "acp agent: boom".into(),
+                },
+                50,
+            )
+            .expect("error before Started finishes the turn");
+        assert_eq!(early["error"], "acp agent: boom");
+        assert_eq!(early["first_token_ms"], Value::Null);
+        assert!(early.get("reply").is_none());
+        assert!(early.get("session_prompt_text").is_none());
+        assert!(early.get("system_roles").is_none());
+        assert!(early.get("system_message_count").is_none());
         assert!(r.pending.is_empty());
     }
 }
