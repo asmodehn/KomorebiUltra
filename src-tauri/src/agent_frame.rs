@@ -266,6 +266,10 @@ mod imp {
             if harness.is_none() {
                 let selection = select_cursor_source();
                 samples = selection.samples;
+                tracing::info!(
+                    "agent frame: window context unavailable reason={}",
+                    crate::sysctx::NO_WINDOW_SOURCE_REASON
+                );
                 harness = Some(AgentFrameState::new(snap, selection.capability));
                 snap = snapshot(&win);
             }
@@ -295,6 +299,9 @@ mod imp {
             if let Ok(text) = std::fs::read_to_string(dir.join("cmd")) {
                 let _ = std::fs::remove_file(dir.join("cmd"));
                 let _events = state.consume(&text);
+                if let Some(window) = state.last_window().cloned() {
+                    crate::sysctx::set_window_context(window);
+                }
                 for command in parse_commands(&text) {
                     exec(&win, &dir, command, &mut seq, &mut watch_ms);
                 }
@@ -329,6 +336,11 @@ mod imp {
             source: String,
             at_ms: u64,
         },
+        /// A read-only window-context observation injected by the harness.
+        /// Only the low-risk fields are parsed; trailing tokens are ignored.
+        Window(crate::sysctx::WindowContext),
+        /// A `window` row whose app is not a minimal identity. No observation.
+        InvalidApp,
         Unknown(&'a str),
     }
 
@@ -363,6 +375,65 @@ mod imp {
                         source: source.to_string(),
                         at_ms,
                     };
+                }
+            }
+        }
+        if let Some(rest) = line.strip_prefix("window ") {
+            // Refuse the identity before parsing anything else: a malformed
+            // row must not fall through to the unknown-command log with the
+            // rejected token still in it.
+            let mut app_parts = rest.split_whitespace();
+            let _ = app_parts.next(); // identity
+            if app_parts
+                .next()
+                .is_some_and(|app| !crate::sysctx::minimal_app(app))
+            {
+                return Command::InvalidApp;
+            }
+            let mut parts = rest.split_whitespace();
+            let fields = (
+                parts.next(),
+                parts.next(),
+                parts.next(),
+                parts.next(),
+                parts.next(),
+                parts.next(),
+                parts.next(),
+                parts.next(),
+                parts.next(),
+                parts.next(),
+                parts.next(),
+            );
+            if let (
+                Some(id),
+                Some(app),
+                Some(x),
+                Some(y),
+                Some(w),
+                Some(h),
+                Some(output),
+                Some(workspace),
+                Some(state),
+                Some(source),
+                Some(at),
+            ) = fields
+            {
+                if let (Ok(x), Ok(y), Ok(w), Ok(h), Ok(at_ms)) =
+                    (x.parse(), y.parse(), w.parse(), h.parse(), at.parse())
+                {
+                    return Command::Window(crate::sysctx::WindowContext {
+                        id: id.to_string(),
+                        app: app.to_string(),
+                        x,
+                        y,
+                        w,
+                        h,
+                        output: output.to_string(),
+                        workspace: workspace.to_string(),
+                        state: state.to_string(),
+                        source: source.to_string(),
+                        at_ms,
+                    });
                 }
             }
         }
@@ -413,9 +484,11 @@ mod imp {
                 tracing::info!("agent frame: window shown");
                 shoot(win, dir, seq, SETTLE_MS);
             }
-            // Cursor commands are consumed by `AgentFrameState::consume`;
+            // Observation commands are consumed by `AgentFrameState::consume`;
             // they never reach a window or OS input operation.
             Command::Cursor { .. } => {}
+            Command::Window(_) => {}
+            Command::InvalidApp => {}
             Command::Unknown(other) => tracing::warn!(cmd = other, "agent frame: unknown command"),
         }
     }
@@ -602,6 +675,28 @@ mod imp {
         }
     }
 
+    /// One low-risk window record, shared by the command event and the JSON
+    /// written to `state.json`. The forbidden tokens in a command never reach
+    /// this function, so they cannot appear in either output.
+    fn window_event(window: &crate::sysctx::WindowContext) -> serde_json::Value {
+        serde_json::json!({
+            "kind": "window:context",
+            "source": window.source,
+            "at": window.at_ms,
+            "payload": {
+                "id": window.id,
+                "app": window.app,
+                "x": window.x,
+                "y": window.y,
+                "w": window.w,
+                "h": window.h,
+                "output": window.output,
+                "workspace": window.workspace,
+                "state": window.state,
+            },
+        })
+    }
+
     /// The harness consumes command text and publishes the value written to
     /// `state.json`. Cursor observations are read-only: they change no window
     /// state and attempt no OS input.
@@ -609,9 +704,11 @@ mod imp {
         snapshot: OwnedSnapshot,
         cursor: CursorCapability,
         last: Option<serde_json::Value>,
+        last_window: Option<crate::sysctx::WindowContext>,
         observations: Vec<serde_json::Value>,
         last_at: Option<u64>,
         last_pos: Option<(i32, i32)>,
+        last_rejection: Option<&'static str>,
         input_calls: Vec<String>,
     }
 
@@ -621,9 +718,11 @@ mod imp {
                 snapshot: snapshot.into(),
                 cursor,
                 last: None,
+                last_window: None,
                 observations: Vec::new(),
                 last_at: None,
                 last_pos: None,
+                last_rejection: None,
                 input_calls: Vec::new(),
             }
         }
@@ -642,9 +741,21 @@ mod imp {
                         source,
                         at_ms,
                     } => {
+                        self.last_rejection = None;
                         if let Some(event) = self.observe(x, y, &source, at_ms) {
                             events.push(event);
                         }
+                    }
+                    Command::Window(window) => {
+                        self.last_rejection = None;
+                        events.push(self.observe_window(window));
+                    }
+                    Command::InvalidApp => {
+                        self.last_rejection = Some(crate::sysctx::INVALID_APP_REASON);
+                        events.push(serde_json::json!({
+                            "kind": "window:context:rejected",
+                            "reason": crate::sysctx::INVALID_APP_REASON,
+                        }));
                     }
                     // The only harness command that changes what receives input.
                     Command::Focus => self.input_calls.push("focus".into()),
@@ -652,6 +763,14 @@ mod imp {
                 }
             }
             events
+        }
+
+        fn push_observation(&mut self, event: serde_json::Value) {
+            self.observations.push(event);
+            if self.observations.len() > MAX_OBSERVATIONS {
+                let excess = self.observations.len() - MAX_OBSERVATIONS;
+                self.observations.drain(..excess);
+            }
         }
 
         fn observe(
@@ -675,14 +794,21 @@ mod imp {
                 "payload": { "x": x, "y": y },
             });
             self.last = Some(event.clone());
-            self.observations.push(event.clone());
-            if self.observations.len() > MAX_OBSERVATIONS {
-                let excess = self.observations.len() - MAX_OBSERVATIONS;
-                self.observations.drain(..excess);
-            }
+            self.push_observation(event.clone());
             self.last_pos = Some((x, y));
             self.last_at = Some(at_ms);
             Some(event)
+        }
+
+        fn observe_window(&mut self, window: crate::sysctx::WindowContext) -> serde_json::Value {
+            let event = window_event(&window);
+            self.last_window = Some(window);
+            self.push_observation(event.clone());
+            event
+        }
+
+        pub(super) fn last_window(&self) -> Option<&crate::sysctx::WindowContext> {
+            self.last_window.as_ref()
         }
 
         pub(super) fn publish(&self) -> serde_json::Value {
@@ -700,8 +826,22 @@ mod imp {
                 },
                 "input_rects": s.rects,
                 "ui": s.ui,
-                "capabilities": { "cursor:global": self.cursor.value() },
-                "last_observations": { "cursor:global": self.last },
+                "acp_context": {
+                    "window_line": crate::sysctx::window_context_line(self.last_window.as_ref()),
+                    "rejection": self.last_rejection,
+                },
+                "capabilities": {
+                    "cursor:global": self.cursor.value(),
+                    "window:context": {
+                        "available": false,
+                        "source": serde_json::Value::Null,
+                        "reason": crate::sysctx::NO_WINDOW_SOURCE_REASON,
+                    },
+                },
+                "last_observations": {
+                    "cursor:global": self.last,
+                    "window:context": self.last_window.as_ref().map(window_event),
+                },
                 "observations": self.observations,
             })
         }
@@ -737,10 +877,15 @@ mod imp {
         }
 
         // ---- T1: folded into the existing full-object state test ---------------
-        /// Given a harness with no global cursor source and a full frontend snapshot
-        /// When the harness publishes its state
-        /// Then the state says cursor:global is unavailable with a reason and has no last record
-        /// And the window, backend, input-region and UI reports stay exactly as they are
+        /// Given a debug-build dev harness with no OS window source selected, no window
+        ///   observation and a per-turn ACP context that reports the window as unavailable
+        /// When the harness publishes its dev state record
+        /// Then the record contains a dev-readable string exactly equal to
+        ///   `- window context: unavailable reason=no passive global window source selected`
+        /// And the existing published fields for capabilities, last observations, window
+        ///   geometry, input rects, UI and the observation array stay as they are today
+        ///
+        /// Existing full-object equality: every retained state field is pinned here.
         #[test]
         fn state_describes_one_overlay_window() {
             let ui = serde_json::json!({
@@ -764,39 +909,61 @@ mod imp {
                 },
                 CursorCapability::unavailable(NO_SOURCE),
             );
-            assert_eq!(
-                harness.publish(),
-                serde_json::json!({
-                    "t_ms": 1234,
-                    "mode": "overlay",
-                    "backend": "plain-window",
-                    "window": {
-                        "label": "main",
-                        "visible": true,
-                        "focused": false,
-                        "size": {"w": 640, "h": 400},
-                        "scale": 2.0,
+            let published = harness.publish();
+            let expected_retained = serde_json::json!({
+                "t_ms": 1234,
+                "mode": "overlay",
+                "backend": "plain-window",
+                "window": {
+                    "label": "main",
+                    "visible": true,
+                    "focused": false,
+                    "size": {"w": 640, "h": 400},
+                    "scale": 2.0,
+                },
+                "input_rects": [[10, 20, 30, 40]],
+                "ui": ui,
+                "capabilities": {
+                    "cursor:global": {
+                        "available": false,
+                        "source": null,
+                        "reason": NO_SOURCE,
                     },
-                    "input_rects": [[10, 20, 30, 40]],
-                    "ui": ui,
-                    "capabilities": {
-                        "cursor:global": {
-                            "available": false,
-                            "source": null,
-                            "reason": NO_SOURCE,
-                        }
-                    },
-                    "last_observations": {"cursor:global": null},
-                    "observations": [],
-                })
+                    "window:context": {
+                        "available": false,
+                        "source": null,
+                        "reason": "no passive global window source selected",
+                    }
+                },
+                "last_observations": {"cursor:global": null, "window:context": null},
+                "observations": [],
+            });
+            let obj = published.as_object().expect("object");
+            for (key, value) in expected_retained.as_object().unwrap() {
+                assert_eq!(
+                    obj.get(key),
+                    Some(value),
+                    "retained state field changed: {key}"
+                );
+            }
+            let text = serde_json::to_string(&published).unwrap();
+            const ACP_WINDOW_LINE: &str =
+                "- window context: unavailable reason=no passive global window source selected";
+            assert!(
+                text.contains(&format!("\"{ACP_WINDOW_LINE}\"")),
+                "published record must carry the exact ACP window line as a string"
             );
+            assert!(!text.contains("\"- window context: available"));
         }
 
         // ---- T2: folded into the existing missing-UI state test ----------------
-        /// Given no frontend snapshot and no global cursor source (S1)
+        /// Given a harness with no OS window source selected and no frontend snapshot
         /// When the harness publishes its state
-        /// Then missing window/UI values are null, capability false carries a reason
-        /// And there is no last cursor observation to invent
+        /// Then window:context is unavailable with a reason and has no last record
+        /// And no window record is invented from process/window fallback data
+        /// And missing window/UI values stay null and the cursor report stays unavailable
+        ///
+        /// Existing missing-UI assertions: retained nulls and cursor capability stay pinned.
         #[test]
         fn state_without_frontend_snapshot_has_no_invented_ui() {
             let harness = AgentFrameState::new(
@@ -824,9 +991,24 @@ mod imp {
                 serde_json::json!({"available": false, "source": null, "reason": NO_SOURCE})
             );
             assert!(state["last_observations"]["cursor:global"].is_null());
+            assert_eq!(
+                state["capabilities"]["window:context"],
+                serde_json::json!({"available":false,"source":null,"reason":"no passive global window source selected"})
+            );
+            assert!(state["last_observations"]["window:context"].is_null());
+            assert_eq!(state["observations"], serde_json::json!([]));
         }
 
         // ---- T3: folded into the existing command-parser test ------------------
+        /// Given the harness command file with the existing commands, one cursor line (S2), one normal
+        ///   eleven-field `window` row for `org.example.Editor`, and one `window` row whose app is a
+        ///   rejected UUID and whose remaining fields are malformed (`nope` in the numeric x position,
+        ///   the other ten fields present)
+        /// When the harness parses its text
+        /// Then each nonblank line becomes the command it names, including the normal `Window` and the
+        ///   refused `InvalidApp`, and the refused raw line is never a `Command::Unknown`
+        /// And unknown or differently cased lines are still not treated as commands
+        ///
         /// Given the harness command file with the existing commands and one cursor line (S2)
         /// When the harness parses its text
         /// Then each nonblank line becomes the command it names, including cursor:global
@@ -834,7 +1016,7 @@ mod imp {
         #[test]
         fn file_commands_are_newline_separated_and_exact() {
             let commands = parse_commands(
-                "frame\n watch 2000 \n\neval document.title\ncursor 412 388 harness 1700\nunknown\nFrame\n watch 0 \n",
+                "frame\n watch 2000 \n\neval document.title\ncursor 412 388 harness 1700\nunknown\nFrame\n watch 0 \nwindow 0x2a org.example.Editor 100 200 800 600 DP-1 ws-3 active harness 1800\nwindow 0x2c 123e4567-e89b-12d3-a456-426614174000 nope 200 800 600 DP-1 ws-3 active harness 2000\n",
             );
             assert_eq!(
                 commands,
@@ -851,16 +1033,86 @@ mod imp {
                     Command::Unknown("unknown"),
                     Command::Unknown("Frame"),
                     Command::Watch(0),
+                    Command::Window(crate::sysctx::WindowContext {
+                        id: "0x2a".into(),
+                        app: "org.example.Editor".into(),
+                        x: 100,
+                        y: 200,
+                        w: 800,
+                        h: 600,
+                        output: "DP-1".into(),
+                        workspace: "ws-3".into(),
+                        state: "active".into(),
+                        source: "harness".into(),
+                        at_ms: 1800,
+                    }),
+                    Command::InvalidApp,
                 ]
             );
+            assert!(commands.iter().all(|c| {
+                !matches!(c, Command::Unknown(s)
+                    if s.contains("123e4567-e89b-12d3-a456-426614174000"))
+            }));
         }
 
         // ---- T4: new, command text in -> published state out ------------------
-        /// Given a cursor command written as text to the harness command channel (S2/S4)
-        /// When the harness consumes that text and publishes its state
-        /// Then the position appears as the last cursor:global observation with the given source and time
-        /// And the published window, input-region and UI reports are the same as before
-        /// And no OS pointer/keyboard input or focus change was attempted on that path
+        /// Given a debug-build dev harness with no OS window source selected, an existing last window
+        ///   observation (`org.example.Viewer`), and rows for all eleven rejected app shapes, each shape
+        ///   with the eleven well-formed low-risk fields, plus two rows with a rejected app and malformed
+        ///   remaining fields: a UUID row with no remaining fields at all (the field-tuple match fails)
+        ///   and an AKIA row with `nope` in the numeric x position (the field tuple matches, x.parse fails)
+        /// When the harness consumes each row and publishes its dev state record
+        /// Then the returned event is exactly `{"kind":"window:context:rejected","reason":"INVALID_APP"}`
+        ///   and `acp_context.rejection` is exactly `INVALID_APP`, with `acp_context` holding exactly
+        ///   `rejection` and `window_line`, and the rejected token appears in neither event nor record
+        /// And no `window:context` observation is returned; the previous last window observation, the
+        ///   observation array, the window capability and `acp_context.window_line` stay exactly as before
+        /// And no input or focus operation is attempted
+        /// And a later normal window row or an emitted cursor observation makes `acp_context.rejection`
+        ///   null again, while a fresh harness starts null and goes to `INVALID_APP` after a refused row
+        ///
+        /// Given a debug-build dev harness with no OS window source selected, one normal `window`
+        ///   row for `org.example.Editor`, and further `window` rows whose app token is a UUID
+        ///   (bare and with an allowed suffix), AKIA, ASIA, a 32-hex run, a 40-alphanumeric run
+        ///   (bare and `==`-padded), a path, a URL, and a labelled title or pixel value, each with
+        ///   the same eleven low-risk fields
+        /// When the harness consumes each row and publishes its dev state record
+        /// Then each rejected row is refused with `INVALID_APP` observable in the returned events
+        ///   or the published record, and no `window:context` observation is returned
+        /// And the previous last window observation (the `org.example.Viewer` row, or null on a
+        ///   fresh harness) and the existing observation array stay unchanged
+        /// And the rejected token appears in neither the published record nor its ACP context line
+        /// And the normal `org.example.Editor` row with the same eleven fields is still accepted
+        ///   and published as before, with the exact ACP line already pinned below
+        /// And the window capability stays unavailable with `no passive global window source selected`,
+        ///   cursor/backend/window/input_rects/UI stay unchanged, and no input or focus call is attempted
+        ///
+        /// Given the same dev harness with no OS window source selected and one `window`
+        ///   command carrying identity `0x2a`, app `org.example.Editor`, x=100, y=200,
+        ///   w=800, h=600, output `DP-1`, workspace `ws-3`, state `active`, source `harness`,
+        ///   timestamp 1800 and trailing forbidden title/pixel/path/URL/credential tokens
+        /// When the harness consumes that one command and publishes its dev state record
+        /// Then the record contains a string exactly equal to the ACP context line
+        ///   `- window context: available source=harness at=1800 id=0x2a app=org.example.Editor x=100 y=200 w=800 h=600 output=DP-1 workspace=ws-3 state=active`
+        /// And none of the five forbidden tokens appears anywhere in the published record
+        /// And the newest consumed window record is still the published last window observation
+        ///   while the window capability still reports that no OS source is selected
+        /// And no input or focus operation is attempted
+        ///
+        /// Given a harness with no OS window source selected and no mutating access granted,
+        ///   one cursor row and two competing window-context rows whose source and timestamp differ,
+        ///   each row carrying five forbidden input tokens (title, pixel data, path, URL and
+        ///   credential-like text) with no stated reason
+        /// When the harness consumes the rows and publishes its state
+        /// Then the newest window-context record is the second row, with its source and timestamp,
+        ///   while the first record is still present in the observation array
+        /// And each record holds only window identity, owning app, position and size, output,
+        ///   workspace identity and state; none of the five forbidden tokens appears anywhere
+        ///   in published state or in either event
+        /// And the cursor observation, backend, window geometry, input rects and UI snapshot are unchanged
+        /// And no OS input or focus change is attempted
+        ///
+        /// Existing cursor-row assertions: retained cursor and no-input behaviour stay pinned.
         #[test]
         fn harness_cursor_command_is_published_without_touching_input() {
             let mut harness = fixture_state(CursorCapability::unavailable(NO_SOURCE));
@@ -892,6 +1144,342 @@ mod imp {
                 harness.input_calls().is_empty(),
                 "a read-only observation must not attempt OS input or focus changes"
             );
+
+            const FORBIDDEN_TITLE: &str = "TITLE_DO_NOT_EMIT_ACME_SALARY_42";
+            const FORBIDDEN_PIXEL: &str = "PIXEL_DO_NOT_EMIT_AAABBBCCC";
+            const FORBIDDEN_PATH: &str = "PATH_DO_NOT_EMIT_home_alexv_private";
+            const FORBIDDEN_URL: &str = "URL_DO_NOT_EMIT_https_example_com_secret";
+            const FORBIDDEN_CRED: &str = "CRED_DO_NOT_EMIT_token_abcd1234";
+
+            let row_a = format!("window 0x2a org.example.Editor 100 200 800 600 DP-1 ws-3 active harness 1800 {FORBIDDEN_TITLE} {FORBIDDEN_PIXEL} {FORBIDDEN_PATH} {FORBIDDEN_URL} {FORBIDDEN_CRED}\n");
+            let row_b = format!("window 0x2b org.example.Viewer 200 300 640 480 HDMI-1 ws-4 background harness-2 1900 {FORBIDDEN_TITLE} {FORBIDDEN_PIXEL} {FORBIDDEN_PATH} {FORBIDDEN_URL} {FORBIDDEN_CRED}\n");
+
+            let ev_a = harness.consume(&row_a);
+            let a = serde_json::json!({
+              "kind":"window:context","source":"harness","at":1800,
+              "payload":{"id":"0x2a","app":"org.example.Editor","x":100,"y":200,
+                         "w":800,"h":600,"output":"DP-1","workspace":"ws-3","state":"active"}
+            });
+            assert_eq!(ev_a, vec![a.clone()]);
+            let after_a = harness.publish();
+            const ACP_WINDOW_LINE_A: &str = "- window context: available source=harness at=1800 id=0x2a app=org.example.Editor x=100 y=200 w=800 h=600 output=DP-1 workspace=ws-3 state=active";
+            let after_a_text = serde_json::to_string(&after_a).unwrap();
+            assert!(
+                after_a_text.contains(&format!("\"{ACP_WINDOW_LINE_A}\"")),
+                "published record must mirror the exact ACP window line for the consumed row"
+            );
+            assert_eq!(after_a["last_observations"]["window:context"], a);
+            assert_eq!(
+                after_a["capabilities"]["window:context"],
+                serde_json::json!({"available":false,"source":null,"reason":"no passive global window source selected"})
+            );
+            assert!(harness.input_calls().is_empty());
+
+            let ev_b = harness.consume(&row_b);
+            let after = harness.publish();
+            let b = serde_json::json!({
+              "kind":"window:context","source":"harness-2","at":1900,
+              "payload":{"id":"0x2b","app":"org.example.Viewer","x":200,"y":300,
+                         "w":640,"h":480,"output":"HDMI-1","workspace":"ws-4","state":"background"}
+            });
+            assert_eq!(ev_b, vec![b.clone()]);
+
+            assert_eq!(after["last_observations"]["window:context"], b);
+            assert_eq!(
+                after["last_observations"]["window:context"]["source"],
+                serde_json::json!("harness-2")
+            );
+            assert_eq!(
+                after["last_observations"]["window:context"]["at"],
+                serde_json::json!(1900)
+            );
+            let obs = after["observations"].as_array().unwrap();
+            assert!(obs.contains(&a));
+            assert_eq!(obs.last().unwrap(), &b);
+
+            let rejected_apps = [
+                (
+                    "uuid",
+                    "123e4567-e89b-12d3-a456-426614174000",
+                    "100 200 800 600 DP-1 ws-3 active harness 2000",
+                ),
+                (
+                    "uuid-suffix",
+                    "123e4567-e89b-12d3-a456-426614174000.x",
+                    "100 200 800 600 DP-1 ws-3 active harness 2000",
+                ),
+                (
+                    "akia",
+                    "AKIAEXAMPLE1234567890",
+                    "100 200 800 600 DP-1 ws-3 active harness 2000",
+                ),
+                (
+                    "asia",
+                    "ASIAEXAMPLE1234567890",
+                    "100 200 800 600 DP-1 ws-3 active harness 2000",
+                ),
+                (
+                    "hex32",
+                    "9f3ad41c7b2e4a5180cd6f27ba39e412",
+                    "100 200 800 600 DP-1 ws-3 active harness 2000",
+                ),
+                (
+                    "alnum40",
+                    "Ab12Cd34Ef56Gh78Ij90Kl12Mn34Op56Qr78St90",
+                    "100 200 800 600 DP-1 ws-3 active harness 2000",
+                ),
+                (
+                    "alnum40-padded",
+                    "Ab12Cd34Ef56Gh78Ij90Kl12Mn34Op56Qr78St90==",
+                    "100 200 800 600 DP-1 ws-3 active harness 2000",
+                ),
+                (
+                    "path",
+                    "/home/alexv/.config/com.example.App/secrets.ini",
+                    "100 200 800 600 DP-1 ws-3 active harness 2000",
+                ),
+                (
+                    "url",
+                    "https://user:token9f3a@portal.invalid/app",
+                    "100 200 800 600 DP-1 ws-3 active harness 2000",
+                ),
+                (
+                    "title",
+                    "title=ACME_SALARY_42",
+                    "100 200 800 600 DP-1 ws-3 active harness 2000",
+                ),
+                (
+                    "pixel",
+                    "pixel=AAABBBCCC",
+                    "100 200 800 600 DP-1 ws-3 active harness 2000",
+                ),
+                // Field-tuple match fails, and the field tuple matches but x does not parse.
+                (
+                    "uuid/missing-fields",
+                    "123e4567-e89b-12d3-a456-426614174000",
+                    "",
+                ),
+                (
+                    "akia/bad-x",
+                    "AKIAEXAMPLE1234567890",
+                    "nope 200 800 600 DP-1 ws-3 active harness 2000",
+                ),
+            ];
+            for (name, app, tail) in rejected_apps {
+                let before = harness.publish();
+                let row = format!("window 0x2c {app} {tail}\n");
+                let events = harness.consume(&row);
+                let after = harness.publish();
+                let events_text = serde_json::to_string(&events).unwrap();
+                let after_text = serde_json::to_string(&after).unwrap();
+                let rejection = serde_json::json!({
+                    "kind": "window:context:rejected",
+                    "reason": "INVALID_APP"
+                });
+
+                assert!(
+                    !events_text.contains("\"kind\":\"window:context\""),
+                    "{name}: rejected row published a window observation"
+                );
+                assert_eq!(events, vec![rejection], "{name}: exact refusal event");
+                assert_eq!(
+                    after["acp_context"]["rejection"],
+                    serde_json::json!("INVALID_APP"),
+                    "{name}: named rejection absent from dev record"
+                );
+                let ctx: std::collections::BTreeSet<&str> = after["acp_context"]
+                    .as_object()
+                    .unwrap()
+                    .keys()
+                    .map(String::as_str)
+                    .collect();
+                assert_eq!(
+                    ctx,
+                    ["rejection", "window_line"].into_iter().collect(),
+                    "{name}: acp_context keys changed"
+                );
+                assert!(
+                    !events_text.contains(app) && !after_text.contains(app),
+                    "{name}: rejected token leaked"
+                );
+                assert_eq!(
+                    after["last_observations"]["window:context"],
+                    before["last_observations"]["window:context"],
+                    "{name}: previous last window observation changed"
+                );
+                assert_eq!(
+                    after["observations"], before["observations"],
+                    "{name}: observation array changed"
+                );
+                assert_eq!(
+                    after["capabilities"]["window:context"],
+                    before["capabilities"]["window:context"],
+                    "{name}: window capability changed"
+                );
+                let line = after["acp_context"]["window_line"].as_str().unwrap();
+                let previous = before["acp_context"]["window_line"].as_str().unwrap();
+                assert!(!line.contains(app), "{name}: token leaked into ACP line");
+                assert_eq!(line, previous, "{name}: ACP window line changed");
+                assert!(harness.input_calls().is_empty(), "{name}: input attempted");
+            }
+
+            let mut fresh = fixture_state(CursorCapability::unavailable(NO_SOURCE));
+            let before = fresh.publish();
+            assert!(before["last_observations"]["window:context"].is_null());
+            assert_eq!(before["observations"], serde_json::json!([]));
+            let fresh_ctx: std::collections::BTreeSet<&str> = before["acp_context"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            assert_eq!(
+                fresh_ctx,
+                ["rejection", "window_line"].into_iter().collect(),
+                "fresh acp_context keys changed"
+            );
+            assert!(before["acp_context"]["rejection"].is_null());
+            let fresh_events = fresh.consume(&format!(
+                "window 0x2c {} 100 200 800 600 DP-1 ws-3 active harness 2000\n",
+                rejected_apps[0].1
+            ));
+            let fresh_after = fresh.publish();
+            assert!(
+                !serde_json::to_string(&fresh_events)
+                    .unwrap()
+                    .contains("\"kind\":\"window:context\""),
+                "null-before: rejected row published a window observation"
+            );
+            assert!(fresh_after["last_observations"]["window:context"].is_null());
+            assert_eq!(fresh_after["observations"], serde_json::json!([]));
+            assert_eq!(
+                fresh_after["acp_context"]["rejection"],
+                serde_json::json!("INVALID_APP")
+            );
+            assert!(
+                !serde_json::to_string(&fresh_after)
+                    .unwrap()
+                    .contains(rejected_apps[0].1),
+                "null-before: rejected token leaked"
+            );
+
+            let normal_events = harness.consume(&row_a);
+            let normal_after = harness.publish();
+            assert_eq!(normal_events, vec![a.clone()]);
+            assert_eq!(
+                normal_after["acp_context"]["rejection"],
+                serde_json::Value::Null
+            );
+            assert!(normal_after["acp_context"]
+                .as_object()
+                .unwrap()
+                .contains_key("rejection"));
+            assert_eq!(
+                normal_after["acp_context"]["window_line"],
+                serde_json::json!(ACP_WINDOW_LINE_A)
+            );
+
+            let mut after_cursor = fixture_state(CursorCapability::unavailable(NO_SOURCE));
+            after_cursor.consume(&format!(
+                "window 0x2c {} 100 200 800 600 DP-1 ws-3 active harness 2000\n",
+                rejected_apps[0].1
+            ));
+            assert_eq!(
+                after_cursor.publish()["acp_context"]["rejection"],
+                serde_json::json!("INVALID_APP")
+            );
+            after_cursor.consume("cursor 500 500 harness 3000\n");
+            let cursor_after = after_cursor.publish();
+            assert!(cursor_after["acp_context"]
+                .as_object()
+                .unwrap()
+                .contains_key("rejection"));
+            assert!(cursor_after["acp_context"]["rejection"].is_null());
+            assert_eq!(
+                cursor_after["last_observations"]["cursor:global"]["at"],
+                serde_json::json!(3000)
+            );
+            assert!(cursor_after["last_observations"]["window:context"].is_null());
+            assert!(after_cursor.input_calls().is_empty());
+
+            assert_eq!(after["last_observations"]["cursor:global"], expected);
+            assert_eq!(
+                after["capabilities"]["window:context"],
+                serde_json::json!({"available":false,"source":null,"reason":"no passive global window source selected"})
+            );
+
+            let top_before: std::collections::BTreeSet<&str> = before
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            let top_after: std::collections::BTreeSet<&str> = after
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            assert_eq!(top_after, top_before);
+            let caps_after: std::collections::BTreeSet<&str> = after["capabilities"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            assert_eq!(
+                caps_after,
+                ["cursor:global", "window:context"].into_iter().collect()
+            );
+            let last_after: std::collections::BTreeSet<&str> = after["last_observations"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            assert_eq!(
+                last_after,
+                ["cursor:global", "window:context"].into_iter().collect()
+            );
+
+            assert_eq!(
+                after["capabilities"]["cursor:global"],
+                before["capabilities"]["cursor:global"]
+            );
+            assert_eq!(after["window"], before["window"]);
+            assert_eq!(after["input_rects"], before["input_rects"]);
+            assert_eq!(after["ui"], before["ui"]);
+            assert_eq!(after["backend"], before["backend"]);
+            assert_eq!(after["mode"], before["mode"]);
+            assert!(harness.input_calls().is_empty());
+
+            let state_text = serde_json::to_string(&after).unwrap();
+            let ev_a_text = serde_json::to_string(&ev_a).unwrap();
+            let ev_b_text = serde_json::to_string(&ev_b).unwrap();
+            for token in [
+                FORBIDDEN_TITLE,
+                FORBIDDEN_PIXEL,
+                FORBIDDEN_PATH,
+                FORBIDDEN_URL,
+                FORBIDDEN_CRED,
+            ] {
+                assert!(
+                    !state_text.contains(token),
+                    "forbidden input token leaked into state: {token}"
+                );
+                assert!(
+                    !after_a_text.contains(token),
+                    "forbidden input token leaked into published record: {token}"
+                );
+                assert!(
+                    !ev_a_text.contains(token),
+                    "forbidden input token leaked into event: {token}"
+                );
+                assert!(
+                    !ev_b_text.contains(token),
+                    "forbidden input token leaked into event: {token}"
+                );
+            }
         }
 
         // ---- T5: new, change-only + 30 Hz, time supplied by the command --------
