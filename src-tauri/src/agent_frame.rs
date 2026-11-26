@@ -966,6 +966,8 @@ mod imp {
         /// And a second publish is byte-identical, and the retained fields including the exact
         ///   `acp_context` object, both capability reports and every field in the existing retained
         ///   literal stay exactly as pinned here
+        /// And `body_commands` is exactly `crate::tools::body_command_catalogue()` and every entry
+        ///   tagged `observe` is available with a null reason
         #[test]
         fn state_describes_one_overlay_window() {
             let ui = serde_json::json!({
@@ -1018,6 +1020,13 @@ mod imp {
             let published = harness.publish();
             let cat = catalogue(&published);
             let entries = entries(cat);
+            assert_eq!(cat, &crate::tools::body_command_catalogue());
+            for (name, entry) in &entries {
+                if mode(entry) == "observe" {
+                    assert_eq!(entry["available"], serde_json::Value::Bool(true), "{name}");
+                    assert!(entry["reason"].is_null(), "{name}");
+                }
+            }
             let names: std::collections::BTreeSet<String> = entries.keys().cloned().collect();
 
             assert_eq!(

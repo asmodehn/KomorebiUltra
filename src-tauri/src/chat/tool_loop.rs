@@ -31,16 +31,7 @@ pub(super) fn extract_tool_call(text: &str) -> Option<ParsedToolCall> {
 /// Tools that don't mutate system state and can run without the
 /// `desktop_automation_enabled` flag. Mutating tools require it.
 fn is_readonly_tool(name: &str) -> bool {
-    matches!(
-        name,
-        "screen_vision"
-            | "active_window"
-            | "context_snapshot"
-            | "list_screens"
-            | "top_processes"
-            | "list_dir"
-            | "read_file"
-    )
+    crate::tools::is_readonly_dispatchable_tool(name)
 }
 
 async fn execute_chat_tool(
@@ -125,4 +116,86 @@ pub(super) async fn run_with_tools(
         return Ok(raw);
     }
     Ok(last_visible)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Given the chat gate with desktop automation disabled and the dispatchable names of the dev
+    ///   catalogue
+    /// When the gate decides each dispatchable name, the two observation-only catalogue kinds and
+    ///   two absent names
+    /// Then each dispatchable `observe` name is allowed and each dispatchable `mutate` name is
+    ///   refused
+    /// And `cursor:global` and `window:context` stay refused though the catalogue marks them
+    ///   `observe`
+    /// And absent names stay refused
+    /// (These rows assert allow/deny only, not refusal text, dispatch calls or any record field.)
+    #[test]
+    fn gate_allow_set_follows_dispatchable_catalogue_effects() {
+        let cat = crate::tools::body_command_catalogue();
+        const DISPATCHABLE: [&str; 13] = [
+            "active_window",
+            "context_snapshot",
+            "list_screens",
+            "top_processes",
+            "click",
+            "type",
+            "key",
+            "move_cursor",
+            "write_file",
+            "read_file",
+            "list_dir",
+            "scroll",
+            "screen_vision",
+        ];
+        for name in DISPATCHABLE {
+            let entry = cat
+                .get(name)
+                .unwrap_or_else(|| panic!("{name} missing from catalogue"));
+            assert_eq!(
+                is_readonly_tool(name),
+                entry["mode"].as_str() == Some("observe"),
+                "{name}"
+            );
+        }
+        for name in ["cursor:global", "window:context"] {
+            assert_eq!(cat[name]["mode"], serde_json::json!("observe"));
+            assert!(
+                !is_readonly_tool(name),
+                "observation kind reached chat dispatcher: {name}"
+            );
+        }
+        for name in ["desktop_click", "not_a_tool"] {
+            assert!(!is_readonly_tool(name), "absent name allowed: {name}");
+        }
+    }
+
+    /// Given one mood-wrapped tool call, one mutating call, one absent name and one truncated block
+    /// When `extract_tool_call` scans each text
+    /// Then name, args and missing-args Null are unchanged, and malformed text still yields None
+    #[test]
+    fn tool_call_parser_is_unchanged() {
+        let wrapped = extract_tool_call(
+            "<mood:thinking><tool_call>{\"tool\":\"cursor:global\",\"args\":{}}</tool_call>",
+        )
+        .expect("mood-wrapped call");
+        assert_eq!(wrapped.name, "cursor:global");
+        assert_eq!(wrapped.args, serde_json::json!({}));
+
+        let mutating = extract_tool_call(
+            "<tool_call>{\"tool\":\"click\",\"args\":{\"x\":1,\"y\":2}}</tool_call>",
+        )
+        .expect("mutating call");
+        assert_eq!(mutating.name, "click");
+        assert_eq!(mutating.args, serde_json::json!({"x": 1, "y": 2}));
+
+        let absent = extract_tool_call("<tool_call>{\"tool\":\"not_a_tool\"}</tool_call>")
+            .expect("absent name");
+        assert_eq!(absent.name, "not_a_tool");
+        assert_eq!(absent.args, serde_json::Value::Null);
+
+        assert!(extract_tool_call("<tool_call>{\"tool\":\"click\"}").is_none());
+    }
 }

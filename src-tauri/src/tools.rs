@@ -44,54 +44,122 @@ impl ToolResult {
 }
 
 /// The one declaration of the body-command vocabulary. The dev harness reports
-/// it; the same names and effects are what a future MCP adapter reads. Building
-/// this record only describes commands: it calls no desktop primitive and grants
-/// no ability to run a mutating one. Mutating access stays unbuilt until an
-/// explicit permissions system with grants and an audit record exists; a
-/// settings switch is not that system.
-pub(crate) fn body_command_catalogue() -> serde_json::Value {
-    const OBSERVE: [&str; 9] = [
-        "active_window",
-        "context_snapshot",
-        "list_screens",
-        "top_processes",
-        "read_file",
-        "list_dir",
-        "screen_vision",
-        "cursor:global",
-        "window:context",
-    ];
-    const MUTATE: [&str; 6] = [
-        "click",
-        "type",
-        "key",
-        "move_cursor",
-        "write_file",
-        "scroll",
-    ];
+/// it; the chat gate and a future MCP adapter read the same names and effects.
+/// Building this record only describes commands: it calls no desktop primitive
+/// and grants no ability to run a mutating one. Mutating access stays unbuilt
+/// until an explicit permissions system with grants and an audit record exists;
+/// a settings switch is not that system.
+struct BodyCommand {
+    name: &'static str,
+    mode: &'static str,
+    dispatchable: bool,
+}
 
+const BODY_COMMANDS: [BodyCommand; 15] = [
+    BodyCommand {
+        name: "active_window",
+        mode: "observe",
+        dispatchable: true,
+    },
+    BodyCommand {
+        name: "context_snapshot",
+        mode: "observe",
+        dispatchable: true,
+    },
+    BodyCommand {
+        name: "list_screens",
+        mode: "observe",
+        dispatchable: true,
+    },
+    BodyCommand {
+        name: "top_processes",
+        mode: "observe",
+        dispatchable: true,
+    },
+    BodyCommand {
+        name: "read_file",
+        mode: "observe",
+        dispatchable: true,
+    },
+    BodyCommand {
+        name: "list_dir",
+        mode: "observe",
+        dispatchable: true,
+    },
+    BodyCommand {
+        name: "screen_vision",
+        mode: "observe",
+        dispatchable: true,
+    },
+    BodyCommand {
+        name: "cursor:global",
+        mode: "observe",
+        dispatchable: false,
+    },
+    BodyCommand {
+        name: "window:context",
+        mode: "observe",
+        dispatchable: false,
+    },
+    BodyCommand {
+        name: "click",
+        mode: "mutate",
+        dispatchable: true,
+    },
+    BodyCommand {
+        name: "type",
+        mode: "mutate",
+        dispatchable: true,
+    },
+    BodyCommand {
+        name: "key",
+        mode: "mutate",
+        dispatchable: true,
+    },
+    BodyCommand {
+        name: "move_cursor",
+        mode: "mutate",
+        dispatchable: true,
+    },
+    BodyCommand {
+        name: "write_file",
+        mode: "mutate",
+        dispatchable: true,
+    },
+    BodyCommand {
+        name: "scroll",
+        mode: "mutate",
+        dispatchable: true,
+    },
+];
+
+pub(crate) fn body_command_catalogue() -> serde_json::Value {
     let mut commands = serde_json::Map::new();
-    for name in OBSERVE {
-        commands.insert(
-            name.to_string(),
+    for cmd in &BODY_COMMANDS {
+        let entry = if cmd.mode == "observe" {
             serde_json::json!({
                 "mode": "observe",
                 "available": true,
                 "reason": serde_json::Value::Null,
-            }),
-        );
-    }
-    for name in MUTATE {
-        commands.insert(
-            name.to_string(),
+            })
+        } else {
             serde_json::json!({
                 "mode": "mutate",
                 "available": false,
                 "reason": "desktop_automation_enabled is not a permissions system; mutating ports stay unbuilt until explicit grants and audit exist",
-            }),
-        );
+            })
+        };
+        commands.insert(cmd.name.to_string(), entry);
     }
     serde_json::Value::Object(commands)
+}
+
+/// Whether a named command is a read-only tool the chat dispatcher can run.
+/// Observation-only catalogue kinds stay here as declarations, not tool calls.
+pub(crate) fn is_readonly_dispatchable_tool(name: &str) -> bool {
+    BODY_COMMANDS
+        .iter()
+        .any(|cmd| cmd.name == name && cmd.dispatchable && cmd.mode == "observe")
 }
 
 /// Execute one tool call. Frontend is responsible for gating behind user
