@@ -132,6 +132,8 @@ mod tests {
     ///   `observe`
     /// And absent names stay refused
     /// (These rows assert allow/deny only, not refusal text, dispatch calls or any record field.)
+    /// And the seven dispatchable observe names stay allowed and the six mutate names stay refused
+    ///   as an explicit retained set, while the two observation kinds and absent names stay refused
     #[test]
     fn gate_allow_set_follows_dispatchable_catalogue_effects() {
         let cat = crate::tools::body_command_catalogue();
@@ -169,6 +171,37 @@ mod tests {
         }
         for name in ["desktop_click", "not_a_tool"] {
             assert!(!is_readonly_tool(name), "absent name allowed: {name}");
+        }
+        const OBSERVE_ALLOWED: [&str; 7] = [
+            "active_window",
+            "context_snapshot",
+            "list_screens",
+            "top_processes",
+            "read_file",
+            "list_dir",
+            "screen_vision",
+        ];
+        const MUTATE_DENIED: [&str; 6] = [
+            "click",
+            "type",
+            "key",
+            "move_cursor",
+            "write_file",
+            "scroll",
+        ];
+        for name in OBSERVE_ALLOWED {
+            assert_eq!(cat[name]["mode"], serde_json::json!("observe"), "{name}");
+            assert!(
+                is_readonly_tool(name),
+                "{name}: retained dispatchable observe name refused"
+            );
+        }
+        for name in MUTATE_DENIED {
+            assert_eq!(cat[name]["mode"], serde_json::json!("mutate"), "{name}");
+            assert!(
+                !is_readonly_tool(name),
+                "{name}: retained mutating name allowed"
+            );
         }
     }
 

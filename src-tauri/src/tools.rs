@@ -53,83 +53,139 @@ struct BodyCommand {
     name: &'static str,
     mode: &'static str,
     dispatchable: bool,
+    description: &'static str,
+    args: &'static [(&'static str, &'static str)],
+    // False for filesystem and terminal commands: ADR 0009 and ADR 0010
+    // forbid advertising them through Komorebi. The policy lives on the one
+    // command declaration, not in a second list kept by the MCP projection.
+    mcp: bool,
 }
 
 const BODY_COMMANDS: [BodyCommand; 15] = [
     BodyCommand {
         name: "active_window",
+        mcp: false,
         mode: "observe",
         dispatchable: true,
+        description: "",
+        args: &[],
     },
     BodyCommand {
         name: "context_snapshot",
+        mcp: false,
         mode: "observe",
         dispatchable: true,
+        description: "",
+        args: &[],
     },
     BodyCommand {
         name: "list_screens",
+        mcp: false,
         mode: "observe",
         dispatchable: true,
+        description: "",
+        args: &[],
     },
     BodyCommand {
         name: "top_processes",
+        mcp: false,
         mode: "observe",
         dispatchable: true,
+        description: "",
+        args: &[],
     },
     BodyCommand {
         name: "read_file",
+        mcp: false,
         mode: "observe",
         dispatchable: true,
+        description: "",
+        args: &[],
     },
     BodyCommand {
         name: "list_dir",
+        mcp: false,
         mode: "observe",
         dispatchable: true,
+        description: "",
+        args: &[],
     },
     BodyCommand {
         name: "screen_vision",
+        mcp: false,
         mode: "observe",
         dispatchable: true,
+        description: "",
+        args: &[],
     },
     BodyCommand {
         name: "cursor:global",
+        mcp: false,
         mode: "observe",
         dispatchable: false,
+        description: "",
+        args: &[],
     },
     BodyCommand {
         name: "window:context",
+        mcp: false,
         mode: "observe",
         dispatchable: false,
+        description: "",
+        args: &[],
     },
     BodyCommand {
         name: "click",
+        mcp: true,
         mode: "mutate",
         dispatchable: true,
+        description: "Click at a screen position",
+        args: &[
+            ("x", "integer"),
+            ("y", "integer"),
+            ("button", "string"),
+            ("double", "boolean"),
+        ],
     },
     BodyCommand {
         name: "type",
+        mcp: true,
         mode: "mutate",
         dispatchable: true,
+        description: "Type text into the focused window",
+        args: &[("text", "string")],
     },
     BodyCommand {
         name: "key",
+        mcp: true,
         mode: "mutate",
         dispatchable: true,
+        description: "Send a key chord to the focused window",
+        args: &[("chord", "string")],
     },
     BodyCommand {
         name: "move_cursor",
+        mcp: true,
         mode: "mutate",
         dispatchable: true,
+        description: "Move the pointer to a screen position",
+        args: &[("x", "integer"), ("y", "integer")],
     },
     BodyCommand {
         name: "write_file",
+        mcp: false,
         mode: "mutate",
         dispatchable: true,
+        description: "Write a file inside the workspace root",
+        args: &[("rel_path", "string"), ("contents", "string")],
     },
     BodyCommand {
         name: "scroll",
+        mcp: true,
         mode: "mutate",
         dispatchable: true,
+        description: "Scroll the focused window",
+        args: &[("delta", "integer"), ("horizontal", "boolean")],
     },
 ];
 
@@ -152,6 +208,46 @@ pub(crate) fn body_command_catalogue() -> serde_json::Value {
         commands.insert(cmd.name.to_string(), entry);
     }
     serde_json::Value::Object(commands)
+}
+
+/// Test-only seam: read one command's description from the one declaration.
+/// Compiled only for tests; changes no published record and no production API.
+#[cfg(test)]
+pub(crate) fn test_body_command_description(name: &str) -> &'static str {
+    BODY_COMMANDS
+        .iter()
+        .find(|cmd| cmd.name == name)
+        .expect("named body command exists")
+        .description
+}
+
+/// The MCP-facing schema declaration. It describes the mutating path only:
+/// observation travels Komorebi -> agent over ACP (ADR 0010 rule 8). Filesystem
+/// and terminal commands are excluded on the declaration itself (ADR 0009/0010);
+/// declaring a schema grants no ability to execute it.
+pub(crate) fn mcp_tool_schemas() -> serde_json::Value {
+    let catalogue = body_command_catalogue();
+    let tools: Vec<serde_json::Value> = BODY_COMMANDS
+        .iter()
+        .filter(|cmd| cmd.mode == "mutate" && cmd.mcp)
+        .map(|cmd| {
+            let mut properties = serde_json::Map::new();
+            for (arg, ty) in cmd.args {
+                properties.insert((*arg).to_string(), serde_json::json!({ "type": ty }));
+            }
+            serde_json::json!({
+                "name": cmd.name,
+                "description": cmd.description,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": properties,
+                },
+                "available": catalogue[cmd.name]["available"],
+                "reason": catalogue[cmd.name]["reason"],
+            })
+        })
+        .collect();
+    serde_json::json!({ "tools": tools })
 }
 
 /// Whether a named command is a read-only tool the chat dispatcher can run.

@@ -831,6 +831,7 @@ mod imp {
                     "rejection": self.last_rejection,
                 },
                 "body_commands": crate::tools::body_command_catalogue(),
+                "mcp_tools": crate::tools::mcp_tool_schemas(),
                 "capabilities": {
                     "cursor:global": self.cursor.value(),
                     "window:context": {
@@ -874,14 +875,12 @@ mod imp {
         ];
 
         fn catalogue(record: &serde_json::Value) -> &serde_json::Value {
-            let extra: Vec<_> = record
-                .as_object()
-                .unwrap()
-                .iter()
-                .filter(|(k, _)| !RETAINED_TOP.contains(&k.as_str()))
-                .collect();
-            assert_eq!(extra.len(), 1, "exactly one new top-level catalogue field");
-            extra[0].1
+            // Keeps the old pin: exactly one new non-retained top-level field
+            // besides the existing body_commands catalogue.
+            let _ = mcp_field(record);
+            record
+                .get("body_commands")
+                .expect("state record carries body_commands")
         }
 
         fn entries(
@@ -936,6 +935,146 @@ mod imp {
             }
         }
 
+        fn key(k: &str) -> String {
+            k.to_ascii_lowercase().replace(['_', '-'], "")
+        }
+
+        fn field<'a>(entry: &'a serde_json::Value, wanted: &str) -> Option<&'a serde_json::Value> {
+            let wanted = key(wanted);
+            entry
+                .as_object()?
+                .iter()
+                .find(|(k, _)| key(k) == wanted)
+                .map(|(_, v)| v)
+        }
+
+        // Truthiness is checked only for keys naming an execution surface.
+        // `additionalProperties: true`, `deprecated: true`, etc. stay legal.
+        fn truthy(v: &serde_json::Value) -> bool {
+            match v {
+                serde_json::Value::Null => false,
+                serde_json::Value::Bool(b) => *b,
+                serde_json::Value::String(s) => !s.is_empty(),
+                serde_json::Value::Array(a) => !a.is_empty(),
+                serde_json::Value::Object(m) => !m.is_empty(),
+                serde_json::Value::Number(_) => true,
+            }
+        }
+
+        // The field key is not pinned by the spec: find the one new
+        // top-level field by excluding the retained fields and body_commands.
+        fn mcp_field(record: &serde_json::Value) -> (&str, &serde_json::Value) {
+            let obj = record.as_object().expect("published record is an object");
+            let extra: Vec<_> = obj
+                .iter()
+                .filter(|(k, _)| {
+                    !RETAINED_TOP.contains(&k.as_str()) && k.as_str() != "body_commands"
+                })
+                .collect();
+            assert_eq!(extra.len(), 1, "exactly one new top-level MCP schema field");
+            (extra[0].0.as_str(), extra[0].1)
+        }
+
+        // Supported shapes: bare array, object keyed by tool name, or a
+        // wrapper object holding one array alongside non-execution metadata.
+        fn mcp_values(schema: &serde_json::Value) -> Vec<&serde_json::Value> {
+            match schema {
+                serde_json::Value::Object(map) => {
+                    let arrays: Vec<_> = map.values().filter(|v| v.is_array()).collect();
+                    if arrays.len() == 1 {
+                        arrays[0]
+                            .as_array()
+                            .expect("one wrapper array")
+                            .iter()
+                            .collect()
+                    } else {
+                        map.values().collect()
+                    }
+                }
+                serde_json::Value::Array(items) => items.iter().collect(),
+                other => panic!("MCP schema must be named entries: {other:?}"),
+            }
+        }
+
+        fn descriptor_name(entry: &serde_json::Value) -> String {
+            entry.as_object().expect("MCP descriptor is an object");
+            field(entry, "name")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+                .or_else(|| {
+                    field(entry, "tool")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                })
+                .or_else(|| {
+                    field(entry, "kind")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                })
+                .expect("MCP descriptor names a command")
+        }
+
+        fn description<'a>(entry: &'a serde_json::Value, name: &str) -> &'a str {
+            for wanted in ["description", "desc"] {
+                if let Some(s) = field(entry, wanted).and_then(serde_json::Value::as_str) {
+                    if !s.trim().is_empty() {
+                        return s;
+                    }
+                }
+            }
+            panic!("{name}: descriptor has no non-empty description");
+        }
+
+        fn input_schema<'a>(entry: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
+            for wanted in ["input_schema", "schema", "parameters"] {
+                if let Some(v) = field(entry, wanted) {
+                    return v;
+                }
+            }
+            panic!("{name}: descriptor has no input schema");
+        }
+
+        fn properties<'a>(
+            schema: &'a serde_json::Value,
+            name: &str,
+        ) -> &'a serde_json::Map<String, serde_json::Value> {
+            field(schema, "properties")
+                .and_then(serde_json::Value::as_object)
+                .unwrap_or_else(|| panic!("{name}: input schema has no properties object"))
+        }
+
+        fn assert_no_execution_surface(v: &serde_json::Value, path: &str) {
+            match v {
+                serde_json::Value::Object(map) => {
+                    for (k, child) in map {
+                        let norm = key(k);
+                        if matches!(
+                            norm.as_str(),
+                            "callable"
+                                | "canexecute"
+                                | "enabled"
+                                | "transport"
+                                | "server"
+                                | "startserver"
+                                | "autostart"
+                        ) {
+                            assert!(
+                                !truthy(child),
+                                "{path}.{k}: MCP declaration grants callability, names a transport or starts a server"
+                            );
+                        }
+                        assert_no_execution_surface(child, &format!("{path}.{k}"));
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for (i, child) in items.iter().enumerate() {
+                        assert_no_execution_surface(child, &format!("{path}[{i}]"));
+                    }
+                }
+                _ => {}
+            }
+        }
+
         fn fixture_state(cursor: CursorCapability) -> AgentFrameState {
             AgentFrameState::new(
                 StateSnapshot {
@@ -956,8 +1095,8 @@ mod imp {
         // ---- T1: folded into the existing full-object state test ---------------
         /// Given a debug-build dev harness publishing a state record with the tools.rs dispatch set,
         ///   the two observation kinds already reported, and no mutating permission granted
-        /// When the record is published
-        /// Then exactly one new top-level field is a catalogue naming all 13 dispatchable tools and
+        /// When the record is published, once and then a second time
+        /// Then the retained top-level fields include the `body_commands` catalogue naming all 13 dispatchable tools and
         ///   both observation kinds, excluding the seven dev controls; every entry has boolean
         ///   availability, a non-empty string reason when unavailable, mode `observe` or `mutate`,
         ///   and no enabled `desktop_automation_enabled` switch; every `mutate` entry is unavailable
@@ -968,6 +1107,16 @@ mod imp {
         ///   literal stay exactly as pinned here
         /// And `body_commands` is exactly `crate::tools::body_command_catalogue()` and every entry
         ///   tagged `observe` is available with a null reason
+        /// And exactly one new top-level field carries an MCP schema declaration: exactly five mutating
+        ///   body commands (`click`, `type`, `key`, `move_cursor`, `scroll`), each once, with a
+        ///   non-empty description, an object input schema covering that command's argument names,
+        ///   and the catalogue's available and reason values; every descriptor is unavailable and
+        ///   its reason names explicit grants and audit
+        /// And `write_file` stays a mutating catalogue entry but is absent from the MCP declaration,
+        ///   as is its description; no read-only command, observation kind, callability, transport or
+        ///   server declaration appears in it
+        /// And every schema name comes from a catalogue entry tagged `mutate`; the tag-flip and
+        ///   no-second-list checks are by-hand source review, not in-process assertions
         #[test]
         fn state_describes_one_overlay_window() {
             let ui = serde_json::json!({
@@ -1036,6 +1185,177 @@ mod imp {
                     .map(|s| s.to_string())
                     .collect::<std::collections::BTreeSet<String>>()
             );
+
+            // ---- MCP schema is the second consumer of the one declaration ----
+            let (schema_field_name, schema) = mcp_field(&published);
+            let mut expected_top: std::collections::BTreeSet<&str> =
+                RETAINED_TOP.iter().copied().collect();
+            expected_top.insert("body_commands");
+            expected_top.insert(schema_field_name);
+            assert_eq!(
+                published
+                    .as_object()
+                    .unwrap()
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<std::collections::BTreeSet<_>>(),
+                expected_top,
+                "retained fields + body_commands + exactly one MCP schema field"
+            );
+
+            const MCP_TOOLS: [&str; 5] = ["click", "type", "key", "move_cursor", "scroll"];
+            let write_file_description = crate::tools::test_body_command_description("write_file");
+            const OBSERVE_NAMES: [&str; 9] = [
+                "active_window",
+                "context_snapshot",
+                "list_screens",
+                "top_processes",
+                "read_file",
+                "list_dir",
+                "screen_vision",
+                "cursor:global",
+                "window:context",
+            ];
+
+            let values = mcp_values(schema);
+            assert_eq!(
+                values.len(),
+                MCP_TOOLS.len(),
+                "MCP schema must name exactly five tools"
+            );
+            let schema_by_name: std::collections::BTreeMap<String, &serde_json::Value> =
+                values.iter().map(|v| (descriptor_name(v), *v)).collect();
+            assert_eq!(
+                schema_by_name.len(),
+                values.len(),
+                "duplicate MCP tool name"
+            );
+            let schema_names: std::collections::BTreeSet<String> =
+                schema_by_name.keys().cloned().collect();
+            assert_eq!(
+                schema_names,
+                MCP_TOOLS
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect::<std::collections::BTreeSet<_>>(),
+                "MCP schema names must be exactly click, type, key, move_cursor, scroll"
+            );
+
+            // Derivation: every advertised name is a catalogue `mutate` entry;
+            // write_file is such an entry but is not advertised.
+            for name in &schema_names {
+                let cat_entry = entries
+                    .get(name)
+                    .unwrap_or_else(|| panic!("schema name invented outside catalogue: {name}"));
+                assert_eq!(
+                    mode(cat_entry),
+                    "mutate",
+                    "{name}: schema name not tagged mutate"
+                );
+            }
+            assert_eq!(
+                cat.get("write_file").map(mode),
+                Some("mutate"),
+                "write_file must still be a mutating catalogue entry"
+            );
+            assert!(
+                !schema_names.contains("write_file"),
+                "write_file advertised as an MCP tool"
+            );
+
+            const EXPECTED_ARGS: [(&str, &[&str]); 5] = [
+                ("click", &["x", "y", "button", "double"]),
+                ("type", &["text"]),
+                ("key", &["chord"]),
+                ("move_cursor", &["x", "y"]),
+                ("scroll", &["delta", "horizontal"]),
+            ];
+            for (name, args) in EXPECTED_ARGS {
+                let d = schema_by_name
+                    .get(name)
+                    .unwrap_or_else(|| panic!("missing MCP descriptor {name}"));
+                let _ = description(d, name);
+                let cat_entry = entries
+                    .get(name)
+                    .unwrap_or_else(|| panic!("{name} missing from catalogue"));
+                assert_eq!(
+                    field(d, "available"),
+                    field(cat_entry, "available"),
+                    "{name}: availability must be carried from the catalogue entry"
+                );
+                assert_eq!(
+                    field(d, "reason"),
+                    field(cat_entry, "reason"),
+                    "{name}: reason must be carried from the catalogue entry"
+                );
+                assert!(!available(d), "{name}: MCP descriptor is available");
+                let reason = field(d, "reason")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                assert!(
+                    reason.contains("explicit")
+                        && reason.contains("grant")
+                        && reason.contains("audit"),
+                    "{name}: reason must name explicit grants and audit: {reason}"
+                );
+
+                let input = input_schema(d, name);
+                let ty = field(input, "type");
+                assert!(
+                    ty == Some(&serde_json::Value::String("object".into()))
+                        || ty.and_then(serde_json::Value::as_array).is_some_and(|a| {
+                            a.contains(&serde_json::Value::String("object".into()))
+                        }),
+                    "{name}: input schema must describe an object"
+                );
+                let props = properties(input, name);
+                assert!(!props.is_empty(), "{name}: empty input schema");
+                for arg in args {
+                    let p = props
+                        .get(*arg)
+                        .unwrap_or_else(|| panic!("{name}: input schema omits {arg}"));
+                    assert!(p.is_object(), "{name}.{arg}: argument has no schema");
+                    assert!(
+                        field(p, "type").is_some()
+                            || field(p, "$ref").is_some()
+                            || field(p, "enum").is_some()
+                            || field(p, "anyOf").is_some(),
+                        "{name}.{arg}: argument type missing"
+                    );
+                }
+            }
+
+            for observe_name in OBSERVE_NAMES {
+                assert!(
+                    !schema_names.contains(observe_name),
+                    "read-only command as MCP tool: {observe_name}"
+                );
+            }
+            assert_no_execution_surface(schema, "mcp_schema");
+
+            let mut leaves = Vec::new();
+            string_leaves(schema, &mut leaves);
+            for s in leaves {
+                let lower = s.to_ascii_lowercase();
+                for marker in ["stdio", "websocket", "tcp://", "http://"] {
+                    assert!(
+                        !lower.contains(marker),
+                        "transport named in MCP schema: {s}"
+                    );
+                }
+                for observe_name in OBSERVE_NAMES {
+                    assert_ne!(
+                        s, observe_name,
+                        "read-only command leaked into MCP schema: {s}"
+                    );
+                }
+                assert_ne!(s, "write_file", "write_file leaked into MCP schema: {s}");
+                assert!(
+                    !s.contains(write_file_description),
+                    "write_file description leaked into MCP schema: {s}"
+                );
+            }
 
             for (name, entry) in &entries {
                 let is_available = available(entry);
@@ -1134,8 +1454,14 @@ mod imp {
                 serde_json::json!({"window_line": ACP_WINDOW_LINE, "rejection": null})
             );
             let first_bytes = serde_json::to_string(&published).unwrap();
-            let second_bytes = serde_json::to_string(&harness.publish()).unwrap();
+            let second = harness.publish();
+            let second_bytes = serde_json::to_string(&second).unwrap();
             assert_eq!(second_bytes, first_bytes, "publish must be byte-identical");
+            assert_eq!(
+                mcp_field(&second),
+                (schema_field_name, schema),
+                "MCP schema changed on the second publish"
+            );
         }
 
         // ---- T2: folded into the existing missing-UI state test ----------------
@@ -1250,11 +1576,13 @@ mod imp {
         ///   and competing window-context rows already consumed in this test
         /// When those rows are consumed and the record published
         /// Then the catalogue is identical to the catalogue published before consumption
+        /// And the MCP schema field is byte-equal before and after both observation commands
         #[test]
         fn harness_cursor_command_is_published_without_touching_input() {
             let mut harness = fixture_state(CursorCapability::unavailable(NO_SOURCE));
             let before = harness.publish();
             let cat_before = (*catalogue(&before)).clone();
+            let mcp_before = (*mcp_field(&before).1).clone();
             // Guard against null-equals-null false greens on the before side.
             assert_eq!(before["window"]["label"], "main");
             assert_eq!(before["input_rects"], serde_json::json!([[10, 20, 30, 40]]));
@@ -1634,6 +1962,11 @@ mod imp {
             assert_eq!(
                 cat_after, &cat_before,
                 "catalogue changed when observations were consumed"
+            );
+            assert_eq!(
+                mcp_field(&after).1,
+                &mcp_before,
+                "MCP schema changed when observations were consumed"
             );
         }
 
