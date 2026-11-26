@@ -295,31 +295,37 @@ pub fn render_context_message() -> String {
 mod tests {
     use super::*;
 
-    /// Given a per-turn ACP context with no window observation and no OS source selected
-    /// When the per-turn context message is rendered
-    /// Then it reports exactly one window line,
-    ///   `- window context: unavailable reason=no passive global window source selected`
-    /// And the preamble, current date, current time, OS and trailer lines remain unchanged
-    ///
-    /// Given one mirror-shaped window row whose app is `org.example.Editor`, rectangle
-    ///   x=100, y=200, w=800, h=600, state `active`, source `mirror` and timestamp 1800,
-    ///   with opaque id `0x2a`, output `DP-1` and workspace `ws-3` supplied
-    /// When that row is installed through `set_window_context` and the message is rendered
-    /// Then exactly one window line appears with app, rectangle and state plus source and time,
-    ///   followed by a newline
-    /// And no `id=`, `output=` or `workspace=` token and no unavailable line appears
-    /// And the preamble, current date, current time, OS and trailer lines remain unchanged
-    ///
-    /// Given a window row whose app is a UUID (bare and with an allowed suffix), AKIA, ASIA,
-    ///   a 32-hex run, a 40-alphanumeric run (bare and `==`-padded), a path, a URL, or a
-    ///   labelled title or pixel value
-    /// When that row is installed through the same entry point and rendered
-    /// Then no available line appears, the rejected token is absent, and the one window line is
-    ///   `- window context: unavailable reason=INVALID_APP`
-    /// And the preamble, date, time, OS and trailer lines remain unchanged
+    /// Given per-turn ACP context with no window observation, a normal window observation and every
+    ///   rejected-app row
+    /// When the context message is rendered
+    /// Then no catalogue-specific token appears in the ACP text: no catalogue name containing `:` or
+    ///   `_`, neither mode word, and no mutating-permission reason; the exact window lines and
+    ///   preamble/trailer stay pinned by the host test
     #[test]
     fn context_message_reports_no_window_source() {
         let msg = render_context_message();
+        const CATALOGUE_SPECIFIC: [&str; 14] = [
+            "active_window",
+            "context_snapshot",
+            "list_screens",
+            "top_processes",
+            "read_file",
+            "list_dir",
+            "screen_vision",
+            "move_cursor",
+            "write_file",
+            "cursor:global",
+            "window:context",
+            "observe",
+            "mutate",
+            "desktop_automation_enabled",
+        ];
+        for token in CATALOGUE_SPECIFIC {
+            assert!(
+                !msg.lines().any(|line| line.contains(token)),
+                "ACP text leaked catalogue token: {token}"
+            );
+        }
         assert!(msg.starts_with("User environment (facts you may reference if relevant):\n"));
         assert!(msg.contains("- current date: "));
         assert!(msg.contains("- current time: "));
@@ -358,6 +364,12 @@ mod tests {
             at_ms: 1800,
         });
         let with_observation = render_context_message();
+        for token in CATALOGUE_SPECIFIC {
+            assert!(
+                !with_observation.lines().any(|line| line.contains(token)),
+                "ACP text leaked catalogue token: {token}"
+            );
+        }
         const ACP_WINDOW_LINE: &str = "- window context: available source=mirror at=1800 app=org.example.Editor x=100 y=200 w=800 h=600 state=active";
         assert!(
             with_observation.contains(&format!("{ACP_WINDOW_LINE}\n")),
@@ -414,6 +426,12 @@ mod tests {
                 ..normal.clone()
             });
             let msg = render_context_message();
+            for token in CATALOGUE_SPECIFIC {
+                assert!(
+                    !msg.lines().any(|line| line.contains(token)),
+                    "{name}: ACP text leaked catalogue token: {token}"
+                );
+            }
             assert!(!msg.contains("- window context: available"), "{name}");
             assert!(!msg.contains(app), "{name}: rejected token leaked");
             assert!(msg.contains("INVALID_APP"), "{name}: named reason absent");

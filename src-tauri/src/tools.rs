@@ -43,6 +43,57 @@ impl ToolResult {
     }
 }
 
+/// The one declaration of the body-command vocabulary. The dev harness reports
+/// it; the same names and effects are what a future MCP adapter reads. Building
+/// this record only describes commands: it calls no desktop primitive and grants
+/// no ability to run a mutating one. Mutating access stays unbuilt until an
+/// explicit permissions system with grants and an audit record exists; a
+/// settings switch is not that system.
+pub(crate) fn body_command_catalogue() -> serde_json::Value {
+    const OBSERVE: [&str; 9] = [
+        "active_window",
+        "context_snapshot",
+        "list_screens",
+        "top_processes",
+        "read_file",
+        "list_dir",
+        "screen_vision",
+        "cursor:global",
+        "window:context",
+    ];
+    const MUTATE: [&str; 6] = [
+        "click",
+        "type",
+        "key",
+        "move_cursor",
+        "write_file",
+        "scroll",
+    ];
+
+    let mut commands = serde_json::Map::new();
+    for name in OBSERVE {
+        commands.insert(
+            name.to_string(),
+            serde_json::json!({
+                "mode": "observe",
+                "available": true,
+                "reason": serde_json::Value::Null,
+            }),
+        );
+    }
+    for name in MUTATE {
+        commands.insert(
+            name.to_string(),
+            serde_json::json!({
+                "mode": "mutate",
+                "available": false,
+                "reason": "desktop_automation_enabled is not a permissions system; mutating ports stay unbuilt until explicit grants and audit exist",
+            }),
+        );
+    }
+    serde_json::Value::Object(commands)
+}
+
 /// Execute one tool call. Frontend is responsible for gating behind user
 /// confirmation when `desktop_automation_enabled` is false.
 #[tauri::command]

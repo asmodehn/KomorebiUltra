@@ -830,6 +830,7 @@ mod imp {
                     "window_line": crate::sysctx::window_context_line(self.last_window.as_ref()),
                     "rejection": self.last_rejection,
                 },
+                "body_commands": crate::tools::body_command_catalogue(),
                 "capabilities": {
                     "cursor:global": self.cursor.value(),
                     "window:context": {
@@ -859,6 +860,82 @@ mod imp {
         // Shared fixtures for the folded + new tests.
         const NO_SOURCE: &str = "no passive global pointer source";
 
+        const RETAINED_TOP: [&str; 10] = [
+            "t_ms",
+            "mode",
+            "backend",
+            "window",
+            "input_rects",
+            "ui",
+            "acp_context",
+            "capabilities",
+            "last_observations",
+            "observations",
+        ];
+
+        fn catalogue(record: &serde_json::Value) -> &serde_json::Value {
+            let extra: Vec<_> = record
+                .as_object()
+                .unwrap()
+                .iter()
+                .filter(|(k, _)| !RETAINED_TOP.contains(&k.as_str()))
+                .collect();
+            assert_eq!(extra.len(), 1, "exactly one new top-level catalogue field");
+            extra[0].1
+        }
+
+        fn entries(
+            cat: &serde_json::Value,
+        ) -> std::collections::BTreeMap<String, &serde_json::Value> {
+            match cat {
+                serde_json::Value::Object(map) => map.iter().map(|(k, v)| (k.clone(), v)).collect(),
+                serde_json::Value::Array(items) => items
+                    .iter()
+                    .map(|v| {
+                        let name = v
+                            .as_str()
+                            .or_else(|| v.get("name").and_then(serde_json::Value::as_str))
+                            .or_else(|| v.get("tool").and_then(serde_json::Value::as_str))
+                            .or_else(|| v.get("kind").and_then(serde_json::Value::as_str))
+                            .expect("catalogue entry names a command");
+                        (name.to_string(), v)
+                    })
+                    .collect(),
+                other => panic!("catalogue must be named entries: {other:?}"),
+            }
+        }
+
+        fn mode(entry: &serde_json::Value) -> &str {
+            entry
+                .as_str()
+                .or_else(|| entry.get("mode").and_then(serde_json::Value::as_str))
+                .expect("entry states observe or mutate")
+        }
+
+        fn available(entry: &serde_json::Value) -> bool {
+            entry
+                .get("available")
+                .and_then(serde_json::Value::as_bool)
+                .expect("availability must be a boolean for every entry")
+        }
+
+        fn string_leaves<'a>(v: &'a serde_json::Value, out: &mut Vec<&'a str>) {
+            match v {
+                serde_json::Value::String(s) => out.push(s),
+                serde_json::Value::Object(map) => {
+                    for val in map.values() {
+                        string_leaves(val, out);
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for val in items {
+                        string_leaves(val, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+
         fn fixture_state(cursor: CursorCapability) -> AgentFrameState {
             AgentFrameState::new(
                 StateSnapshot {
@@ -877,15 +954,18 @@ mod imp {
         }
 
         // ---- T1: folded into the existing full-object state test ---------------
-        /// Given a debug-build dev harness with no OS window source selected, no window
-        ///   observation and a per-turn ACP context that reports the window as unavailable
-        /// When the harness publishes its dev state record
-        /// Then the record contains a dev-readable string exactly equal to
-        ///   `- window context: unavailable reason=no passive global window source selected`
-        /// And the existing published fields for capabilities, last observations, window
-        ///   geometry, input rects, UI and the observation array stay as they are today
-        ///
-        /// Existing full-object equality: every retained state field is pinned here.
+        /// Given a debug-build dev harness publishing a state record with the tools.rs dispatch set,
+        ///   the two observation kinds already reported, and no mutating permission granted
+        /// When the record is published
+        /// Then exactly one new top-level field is a catalogue naming all 13 dispatchable tools and
+        ///   both observation kinds, excluding the seven dev controls; every entry has boolean
+        ///   availability, a non-empty string reason when unavailable, mode `observe` or `mutate`,
+        ///   and no enabled `desktop_automation_enabled` switch; every `mutate` entry is unavailable
+        ///   with a reason naming `desktop_automation_enabled`; no credential-like string appears
+        ///   in the catalogue
+        /// And a second publish is byte-identical, and the retained fields including the exact
+        ///   `acp_context` object, both capability reports and every field in the existing retained
+        ///   literal stay exactly as pinned here
         #[test]
         fn state_describes_one_overlay_window() {
             let ui = serde_json::json!({
@@ -909,7 +989,92 @@ mod imp {
                 },
                 CursorCapability::unavailable(NO_SOURCE),
             );
+            const EXPECTED: [&str; 15] = [
+                "active_window",
+                "context_snapshot",
+                "list_screens",
+                "top_processes",
+                "read_file",
+                "list_dir",
+                "screen_vision",
+                "click",
+                "type",
+                "key",
+                "move_cursor",
+                "write_file",
+                "scroll",
+                "cursor:global",
+                "window:context",
+            ];
+            const MUTATE: [&str; 6] = [
+                "click",
+                "type",
+                "key",
+                "move_cursor",
+                "write_file",
+                "scroll",
+            ];
+
             let published = harness.publish();
+            let cat = catalogue(&published);
+            let entries = entries(cat);
+            let names: std::collections::BTreeSet<String> = entries.keys().cloned().collect();
+
+            assert_eq!(
+                names,
+                EXPECTED
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect::<std::collections::BTreeSet<String>>()
+            );
+
+            for (name, entry) in &entries {
+                let is_available = available(entry);
+                assert_ne!(
+                    entry.get("desktop_automation_enabled"),
+                    Some(&serde_json::Value::Bool(true)),
+                    "{name}: setting switch exposed as enabled"
+                );
+                if !is_available {
+                    let reason = entry
+                        .get("reason")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default();
+                    assert!(
+                        !reason.is_empty(),
+                        "{name}: unavailable without a string reason"
+                    );
+                }
+                if MUTATE.contains(&name.as_str()) {
+                    assert_eq!(mode(entry), "mutate", "{name}");
+                    assert!(!is_available, "{name}: mutate entry is available");
+                    let reason = entry["reason"].as_str().unwrap_or_default();
+                    assert!(
+                        reason.contains("desktop_automation_enabled"),
+                        "{name}: {reason}"
+                    );
+                } else {
+                    assert_eq!(mode(entry), "observe", "{name}");
+                }
+            }
+            for control in ["eval", "frame", "watch", "hide", "show", "focus", "gtk"] {
+                assert!(
+                    !names.contains(control),
+                    "dev control in catalogue: {control}"
+                );
+            }
+
+            let mut strings = Vec::new();
+            string_leaves(cat, &mut strings);
+            for s in strings {
+                for marker in ["token=", "AKIA", "ASIA", "CRED_DO_NOT_EMIT"] {
+                    assert!(
+                        !s.contains(marker),
+                        "credential-like value in catalogue: {s}"
+                    );
+                }
+            }
+
             let expected_retained = serde_json::json!({
                 "t_ms": 1234,
                 "mode": "overlay",
@@ -954,6 +1119,14 @@ mod imp {
                 "published record must carry the exact ACP window line as a string"
             );
             assert!(!text.contains("\"- window context: available"));
+
+            assert_eq!(
+                published["acp_context"],
+                serde_json::json!({"window_line": ACP_WINDOW_LINE, "rejection": null})
+            );
+            let first_bytes = serde_json::to_string(&published).unwrap();
+            let second_bytes = serde_json::to_string(&harness.publish()).unwrap();
+            assert_eq!(second_bytes, first_bytes, "publish must be byte-identical");
         }
 
         // ---- T2: folded into the existing missing-UI state test ----------------
@@ -1008,23 +1181,14 @@ mod imp {
         }
 
         // ---- T3: folded into the existing command-parser test ------------------
-        /// Given the harness command file with the existing commands, one cursor line (S2), one normal
-        ///   eleven-field `window` row for `org.example.Editor`, and one `window` row whose app is a
-        ///   rejected UUID and whose remaining fields are malformed (`nope` in the numeric x position,
-        ///   the other ten fields present)
-        /// When the harness parses its text
-        /// Then each nonblank line becomes the command it names, including the normal `Window` and the
-        ///   refused `InvalidApp`, and the refused raw line is never a `Command::Unknown`
-        /// And unknown or differently cased lines are still not treated as commands
-        ///
-        /// Given the harness command file with the existing commands and one cursor line (S2)
-        /// When the harness parses its text
-        /// Then each nonblank line becomes the command it names, including cursor:global
-        /// And unknown or differently cased lines are still not treated as commands
+        /// Given the harness command file with all seven dev-only controls and two dispatchable tool names
+        /// When the harness parses that text
+        /// Then each dev control still parses to its existing dev Command, each dispatcher name is still
+        ///   Unknown, and all previously parsed rows stay as pinned
         #[test]
         fn file_commands_are_newline_separated_and_exact() {
             let commands = parse_commands(
-                "frame\n watch 2000 \n\neval document.title\ncursor 412 388 harness 1700\nunknown\nFrame\n watch 0 \nwindow 0x2a org.example.Editor 100 200 800 600 DP-1 ws-3 active harness 1800\nwindow 0x2c 123e4567-e89b-12d3-a456-426614174000 nope 200 800 600 DP-1 ws-3 active harness 2000\n",
+                "frame\n watch 2000 \n\neval document.title\ncursor 412 388 harness 1700\nunknown\nFrame\n watch 0 \nwindow 0x2a org.example.Editor 100 200 800 600 DP-1 ws-3 active harness 1800\nwindow 0x2c 123e4567-e89b-12d3-a456-426614174000 nope 200 800 600 DP-1 ws-3 active harness 2000\nframe\nwatch 10\neval document.title\nhide\nshow\nfocus\ngtk\nclick 1 2\nactive_window\n",
             );
             assert_eq!(
                 commands,
@@ -1055,6 +1219,15 @@ mod imp {
                         at_ms: 1800,
                     }),
                     Command::InvalidApp,
+                    Command::Frame,
+                    Command::Watch(10),
+                    Command::Eval("document.title"),
+                    Command::Hide,
+                    Command::Show,
+                    Command::Focus,
+                    Command::Gtk,
+                    Command::Unknown("click 1 2"),
+                    Command::Unknown("active_window"),
                 ]
             );
             assert!(commands.iter().all(|c| {
@@ -1064,69 +1237,15 @@ mod imp {
         }
 
         // ---- T4: new, command text in -> published state out ------------------
-        /// Given a debug-build dev harness with no OS window source selected, an existing last window
-        ///   observation (`org.example.Viewer`), and rows for all eleven rejected app shapes, each shape
-        ///   with the eleven well-formed low-risk fields, plus two rows with a rejected app and malformed
-        ///   remaining fields: a UUID row with no remaining fields at all (the field-tuple match fails)
-        ///   and an AKIA row with `nope` in the numeric x position (the field tuple matches, x.parse fails)
-        /// When the harness consumes each row and publishes its dev state record
-        /// Then the returned event is exactly `{"kind":"window:context:rejected","reason":"INVALID_APP"}`
-        ///   and `acp_context.rejection` is exactly `INVALID_APP`, with `acp_context` holding exactly
-        ///   `rejection` and `window_line`, and the rejected token appears in neither event nor record
-        /// And no `window:context` observation is returned; the previous last window observation, the
-        ///   observation array, the window capability and `acp_context.window_line` stay exactly as before
-        /// And no input or focus operation is attempted
-        /// And a later normal window row or an emitted cursor observation makes `acp_context.rejection`
-        ///   null again, while a fresh harness starts null and goes to `INVALID_APP` after a refused row
-        ///
-        /// Given a debug-build dev harness with no OS window source selected, one normal `window`
-        ///   row for `org.example.Editor`, and further `window` rows whose app token is a UUID
-        ///   (bare and with an allowed suffix), AKIA, ASIA, a 32-hex run, a 40-alphanumeric run
-        ///   (bare and `==`-padded), a path, a URL, and a labelled title or pixel value, each with
-        ///   the same eleven low-risk fields
-        /// When the harness consumes each row and publishes its dev state record
-        /// Then each rejected row is refused with `INVALID_APP` observable in the returned events
-        ///   or the published record, and no `window:context` observation is returned
-        /// And the previous last window observation (the `org.example.Viewer` row, or null on a
-        ///   fresh harness) and the existing observation array stay unchanged
-        /// And the rejected token appears in neither the published record nor its ACP context line
-        /// And the normal `org.example.Editor` row with the same eleven fields is still accepted
-        ///   and published as before, with the exact ACP line already pinned below
-        /// And the window capability stays unavailable with `no passive global window source selected`,
-        ///   cursor/backend/window/input_rects/UI stay unchanged, and no input or focus call is attempted
-        ///
-        /// Given the same dev harness with no OS window source selected and one `window`
-        ///   command carrying identity `0x2a`, app `org.example.Editor`, x=100, y=200,
-        ///   w=800, h=600, output `DP-1`, workspace `ws-3`, state `active`, source `harness`,
-        ///   timestamp 1800 and trailing forbidden title/pixel/path/URL/credential tokens
-        /// When the harness consumes that one command and publishes its dev state record
-        /// Then `acp_context.window_line` is exactly the per-turn ACP context line
-        ///   `- window context: available source=harness at=1800 app=org.example.Editor x=100 y=200 w=800 h=600 state=active`
-        /// And that line equals `window_context_line` for the newest consumed row and carries no
-        ///   `id=`, `output=` or `workspace=` token
-        /// And none of the five forbidden tokens appears anywhere in the published record
-        /// And the newest consumed window record is still the published last window observation
-        ///   while the window capability still reports that no OS source is selected
-        /// And no input or focus operation is attempted
-        ///
-        /// Given a harness with no OS window source selected and no mutating access granted,
-        ///   one cursor row and two competing window-context rows whose source and timestamp differ,
-        ///   each row carrying five forbidden input tokens (title, pixel data, path, URL and
-        ///   credential-like text) with no stated reason
-        /// When the harness consumes the rows and publishes its state
-        /// Then the newest window-context record is the second row, with its source and timestamp,
-        ///   while the first record is still present in the observation array
-        /// And each record holds only window identity, owning app, position and size, output,
-        ///   workspace identity and state; none of the five forbidden tokens appears anywhere
-        ///   in published state or in either event
-        /// And the cursor observation, backend, window geometry, input rects and UI snapshot are unchanged
-        /// And no OS input or focus change is attempted
-        ///
-        /// Existing cursor-row assertions: retained cursor and no-input behaviour stay pinned.
+        /// Given the host harness with no mutating permission and no window observation, then the cursor
+        ///   and competing window-context rows already consumed in this test
+        /// When those rows are consumed and the record published
+        /// Then the catalogue is identical to the catalogue published before consumption
         #[test]
         fn harness_cursor_command_is_published_without_touching_input() {
             let mut harness = fixture_state(CursorCapability::unavailable(NO_SOURCE));
             let before = harness.publish();
+            let cat_before = (*catalogue(&before)).clone();
             // Guard against null-equals-null false greens on the before side.
             assert_eq!(before["window"]["label"], "main");
             assert_eq!(before["input_rects"], serde_json::json!([[10, 20, 30, 40]]));
@@ -1501,6 +1620,12 @@ mod imp {
                     "forbidden input token leaked into event: {token}"
                 );
             }
+
+            let cat_after = catalogue(&after);
+            assert_eq!(
+                cat_after, &cat_before,
+                "catalogue changed when observations were consumed"
+            );
         }
 
         // ---- T5: new, change-only + 30 Hz, time supplied by the command --------
