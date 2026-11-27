@@ -1,4 +1,4 @@
-import { useEffect, type MutableRefObject } from "react";
+import { useEffect, useRef, type MutableRefObject } from "react";
 import { avatarState } from "../avatarState";
 import { stripMoodTags } from "../emotion";
 import { onChat, type ChatEvent, type PublicSettings } from "../api";
@@ -11,6 +11,22 @@ export interface LastTurn {
   response: string;
   route: Route;
   modelLabel: string;
+}
+
+type ProgressEvent = Extract<ChatEvent, { kind: "progress" }>;
+
+/** Build the display-only line for one progress event. Only named fields are
+ * read, so an unexpected `input`/`output` field on the wire cannot reach the
+ * bubble. */
+function progressLine(e: ProgressEvent): string {
+  switch (e.stage) {
+    case "thought":
+      return stripMoodTags(e.text ?? "");
+    case "tool_call":
+      return [e.title, e.tool_id, e.status].filter(Boolean).join(" · ");
+    case "tool_update":
+      return [e.tool_id, e.status].filter(Boolean).join(" · ");
+  }
 }
 
 /**
@@ -44,6 +60,9 @@ export function useChatStream(opts: {
     setFeedbackKey,
     scheduleBubbleHide,
   } = opts;
+  // Latest visible progress line. It is display-only: reply text, feedback
+  // and TTS all come from rawTextRef, which progress never touches.
+  const progressRef = useRef<string | null>(null);
 
   useEffect(() => {
     const p = onChat((e: ChatEvent) => {
@@ -58,6 +77,7 @@ export function useChatStream(opts: {
           setRoute(e.route);
           setBubbleText("");
           rawTextRef.current = "";
+          progressRef.current = null;
           setThinking(true);
           // Open a fresh feedback turn. Prompt was stashed in `lastTurnRef`
           // by handleSubmit; record route + model_label here when known.
@@ -86,14 +106,26 @@ export function useChatStream(opts: {
             };
           }
           break;
+        case "progress": {
+          // Display only. The reply accumulator, feedback snapshot and speech
+          // all read rawTextRef, which progress never writes to.
+          const line = progressLine(e);
+          progressRef.current = line;
+          setThinking(true);
+          setBubbleText(line);
+          break;
+        }
         case "token":
           setThinking(false);
+          progressRef.current = null;
           rawTextRef.current += e.text;
           avatarState.onToken(rawTextRef.current);
           setBubbleText(stripMoodTags(rawTextRef.current));
           break;
         case "done":
           setThinking(false);
+          progressRef.current = null;
+          setBubbleText(stripMoodTags(rawTextRef.current));
           avatarState.onDone();
           // Freeze the response text for feedback before scheduling hide.
           if (lastTurnRef.current && lastTurnRef.current.id === e.id) {
@@ -106,8 +138,12 @@ export function useChatStream(opts: {
           break;
         case "error":
           setThinking(false);
+          progressRef.current = null;
           avatarState.onDone(500);
           setBubbleText(`⚠ ${e.message}`);
+          // An error has no rateable answer; drop the route so the bubble's
+          // feedback buttons do not appear for this turn.
+          setRoute(null);
           scheduleBubbleHide(6000);
           activeIdRef.current = null;
           rawTextRef.current = "";

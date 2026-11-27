@@ -2,6 +2,41 @@
 
 use tauri::{AppHandle, Wry};
 
+#[cfg(test)]
+thread_local! {
+    static SPOKEN_CAPTURE: std::cell::RefCell<Option<Vec<String>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(super) fn start_spoken_capture() {
+    SPOKEN_CAPTURE.with(|c| *c.borrow_mut() = Some(Vec::new()));
+}
+
+#[cfg(test)]
+pub(super) fn take_spoken_capture() -> Vec<String> {
+    SPOKEN_CAPTURE.with(|c| c.borrow_mut().take().unwrap_or_default())
+}
+
+#[cfg(test)]
+pub(in crate::chat) async fn capture_spoken(text: String) {
+    let clean = sanitize_for_tts(&text);
+    if clean.trim().is_empty() {
+        return;
+    }
+    tracing::info!(
+        raw_len = text.len(),
+        clean_len = clean.len(),
+        preview = %clean.chars().take(120).collect::<String>(),
+        "tts input"
+    );
+    SPOKEN_CAPTURE.with(|c| {
+        if let Some(items) = c.borrow_mut().as_mut() {
+            items.push(clean);
+        }
+    });
+}
+
 /// Fire-and-forget TTS: if a TTS provider is configured, synthesize the
 /// reply and emit it to the frontend for playback + Live2D lip-sync.
 /// Any error is logged but never surfaced to the UI.
@@ -16,6 +51,21 @@ pub(super) async fn maybe_speak(app: &AppHandle<Wry>, text: String) {
         preview = %clean.chars().take(120).collect::<String>(),
         "tts input"
     );
+    #[cfg(test)]
+    {
+        let captured = SPOKEN_CAPTURE.with(|c| {
+            let mut slot = c.borrow_mut();
+            if let Some(items) = slot.as_mut() {
+                items.push(clean.clone());
+                true
+            } else {
+                false
+            }
+        });
+        if captured {
+            return;
+        }
+    }
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         match crate::commands::synthesize_via_provider(&app, &clean).await {
@@ -150,7 +200,7 @@ fn utf8_char_len(b: u8) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::sanitize_for_tts;
+    use super::{sanitize_for_tts, start_spoken_capture, take_spoken_capture};
 
     #[test]
     fn strips_kaomoji_symbols_from_reaction_lines() {
@@ -161,5 +211,15 @@ mod tests {
     #[test]
     fn symbol_only_text_becomes_empty() {
         assert_eq!(sanitize_for_tts("~ ^_^ ~"), "");
+    }
+
+    #[tokio::test]
+    async fn capture_spoken_records_sanitized_tts_input() {
+        start_spoken_capture();
+        super::capture_spoken("TTS-ANSWER-ONLY".to_string()).await;
+        let spoken = take_spoken_capture();
+        assert_eq!(spoken.len(), 1);
+        assert_eq!(spoken[0], sanitize_for_tts("TTS-ANSWER-ONLY"));
+        assert!(!spoken[0].contains("PROGRESS-TTS-SENTINEL"));
     }
 }

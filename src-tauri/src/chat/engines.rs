@@ -9,7 +9,7 @@ use super::events::{emit, ChatEventOut};
 use super::ChatService;
 use crate::settings;
 use futures::StreamExt;
-use komorebi_cloud::{AcpClient, OpenRouterClient, StreamEvent, TokenStream};
+use komorebi_cloud::{AcpClient, CloudError, OpenRouterClient, StreamEvent, TokenStream};
 use komorebi_router::ChatMessage;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -85,6 +85,37 @@ pub(super) async fn stream_acp(
     drain(app, service, id, stream).await
 }
 
+/// One observable step of a provider/agent stream. Progress is emitted as a
+/// chat event but never appended to the reply accumulator.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum DrainStep {
+    Emit(ChatEventOut),
+    Done,
+    Fail(String),
+}
+
+pub(super) fn drain_step(
+    acc: &mut String,
+    id: &str,
+    evt: Result<StreamEvent, CloudError>,
+) -> DrainStep {
+    match evt {
+        Ok(StreamEvent::Token(text)) => {
+            acc.push_str(&text);
+            DrainStep::Emit(ChatEventOut::Token {
+                id: id.into(),
+                text,
+            })
+        }
+        Ok(StreamEvent::Progress(progress)) => DrainStep::Emit(ChatEventOut::Progress {
+            id: id.into(),
+            progress,
+        }),
+        Ok(StreamEvent::Done) => DrainStep::Done,
+        Err(e) => DrainStep::Fail(e.to_string()),
+    }
+}
+
 /// Forward a provider/agent stream to the bubble, accumulating the reply.
 /// `stream_cloud` and `stream_acp` end here; `stream_local` has its own
 /// event type and its own cancel handling.
@@ -99,19 +130,10 @@ async fn drain(
         if service.cancel.load(Ordering::SeqCst) {
             break;
         }
-        match evt {
-            Ok(StreamEvent::Token(t)) => {
-                acc.push_str(&t);
-                emit(
-                    app,
-                    ChatEventOut::Token {
-                        id: id.into(),
-                        text: t,
-                    },
-                );
-            }
-            Ok(StreamEvent::Done) => break,
-            Err(e) => return Err(e.to_string()),
+        match drain_step(&mut acc, id, evt) {
+            DrainStep::Emit(chat_event) => emit(app, chat_event),
+            DrainStep::Done => break,
+            DrainStep::Fail(message) => return Err(message),
         }
     }
     Ok(acc)
@@ -161,5 +183,139 @@ pub(super) async fn stream_local(
             Ok(msg.to_string())
         }
         Err(e) => Err(e.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use komorebi_cloud::{AcpProgress, CloudError};
+
+    fn step(acc: &mut String, evt: Result<StreamEvent, CloudError>) -> DrainStep {
+        drain_step(acc, "t1", evt)
+    }
+
+    /// Given an empty reply accumulator
+    /// When Token, Done and Err stream items are stepped
+    /// Then Token appends and emits Token, Done terminates without changing the accumulator,
+    /// And Err emits Fail with the unchanged CloudError text (retained)
+    /// Given the same accumulator and all three progress stages before any token
+    /// When each progress item is stepped
+    /// Then each emits a Progress event for turn t1 and the accumulator stays empty
+    /// A following token still produces the final text only
+    #[test]
+    fn token_done_and_error_accumulation_are_unchanged() {
+        let mut acc = String::new();
+        assert_eq!(
+            step(&mut acc, Ok(StreamEvent::Token("Hel".into()))),
+            DrainStep::Emit(ChatEventOut::Token {
+                id: "t1".into(),
+                text: "Hel".into()
+            })
+        );
+        assert_eq!(acc, "Hel");
+        assert_eq!(step(&mut acc, Ok(StreamEvent::Done)), DrainStep::Done);
+        assert_eq!(acc, "Hel");
+
+        let mut err_acc = String::new();
+        assert_eq!(
+            step(&mut err_acc, Err(CloudError::Acp("boom".into()))),
+            DrainStep::Fail("acp agent: boom".into())
+        );
+        assert_eq!(err_acc, "");
+
+        let mut progress_acc = String::new();
+        let stages = [
+            AcpProgress::Thought {
+                text: "PROGRESS-SENTINEL".into(),
+            },
+            AcpProgress::ToolCall {
+                tool_id: "call-1".into(),
+                title: "Read file".into(),
+                status: Some("pending".into()),
+            },
+            AcpProgress::ToolUpdate {
+                tool_id: "call-1".into(),
+                status: "completed".into(),
+            },
+        ];
+        for stage in stages {
+            let expected = stage.clone();
+            assert_eq!(
+                step(&mut progress_acc, Ok(StreamEvent::Progress(stage))),
+                DrainStep::Emit(ChatEventOut::Progress {
+                    id: "t1".into(),
+                    progress: expected
+                })
+            );
+            assert_eq!(progress_acc, "");
+        }
+
+        assert_eq!(
+            step(&mut progress_acc, Ok(StreamEvent::Token("Final".into()))),
+            DrainStep::Emit(ChatEventOut::Token {
+                id: "t1".into(),
+                text: "Final".into()
+            })
+        );
+        assert_eq!(progress_acc, "Final");
+        assert_eq!(
+            step(&mut progress_acc, Ok(StreamEvent::Done)),
+            DrainStep::Done
+        );
+        assert_eq!(progress_acc, "Final");
+    }
+
+    #[tokio::test]
+    async fn e3_progress_never_reaches_tts_capture() {
+        use crate::chat::speak;
+        speak::start_spoken_capture();
+        let events = vec![
+            Ok(StreamEvent::Progress(AcpProgress::Thought {
+                text: "PROGRESS-TTS-SENTINEL".into(),
+            })),
+            Ok(StreamEvent::Progress(AcpProgress::ToolCall {
+                tool_id: "call-1".into(),
+                title: "Read file".into(),
+                status: Some("pending".into()),
+            })),
+            Ok(StreamEvent::Token("TTS-ANSWER-ONLY".into())),
+            Ok(StreamEvent::Done),
+        ];
+        let (res, emitted) = super::test_support::drain_for_test(events).await;
+        let answer = res.expect("drain ok");
+        assert_eq!(answer, "TTS-ANSWER-ONLY");
+        assert!(emitted
+            .iter()
+            .any(|e| matches!(e, ChatEventOut::Progress { .. })));
+        assert!(emitted
+            .iter()
+            .any(|e| matches!(e, ChatEventOut::Token { .. })));
+
+        speak::capture_spoken(answer).await;
+        let spoken = speak::take_spoken_capture();
+        assert_eq!(spoken.len(), 1);
+        assert!(!spoken[0].contains("PROGRESS"));
+        assert!(spoken[0].contains("TTS"));
+    }
+}
+
+#[cfg(test)]
+mod test_support {
+    use super::*;
+
+    pub(super) async fn drain_for_test(
+        events: Vec<Result<StreamEvent, CloudError>>,
+    ) -> (Result<String, String>, Vec<ChatEventOut>) {
+        let mut acc = String::new();
+        let mut out = Vec::new();
+        for evt in events {
+            match drain_step(&mut acc, "turn-1", evt) {
+                DrainStep::Emit(chat_event) => out.push(chat_event),
+                DrainStep::Done => break,
+                DrainStep::Fail(message) => return (Err(message), out),
+            }
+        }
+        (Ok(acc), out)
     }
 }

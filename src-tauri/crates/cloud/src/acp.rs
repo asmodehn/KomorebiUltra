@@ -19,7 +19,7 @@
 //! overrides it for experiments. OpenCode reads an `opencode.json` placed in
 //! that directory, which is how a model can be pinned without a code change.
 
-use crate::{CloudError, StreamEvent, TokenStream};
+use crate::{AcpProgress, CloudError, StreamEvent, TokenStream};
 use komorebi_router::{ChatMessage, Role};
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -74,6 +74,116 @@ pub fn session_prompt_request(session_id: &str, id: u64, text: &str) -> Value {
             "prompt": [{ "type": "text", "text": text }]
         }),
     )
+}
+
+/// Per-turn facts the observation seam needs: which prompt is active and
+/// which tool calls this turn has already reported. The caller owns the view
+/// so the same observation can be driven without a live agent process.
+#[derive(Debug, Clone, Default)]
+pub struct TurnView {
+    pub active_prompt_id: Option<u64>,
+    pub reported_tool_ids: Vec<String>,
+}
+
+/// Observe one parsed JSON-RPC line from the agent. Progress updates stay
+/// distinct from reply tokens; a tool update is only reported after its call
+/// has been observed through this same seam. Raw tool input/output is never
+/// read, so it cannot reach a chat event.
+pub fn turn_events(msg: &Value, view: &mut TurnView) -> Vec<Result<StreamEvent, CloudError>> {
+    let Some(active) = view.active_prompt_id else {
+        return Vec::new();
+    };
+    if msg.get("method").and_then(Value::as_str) == Some("session/update") {
+        let update = &msg["params"]["update"];
+        let kind = update["sessionUpdate"].as_str().unwrap_or_default();
+        let text = |field: &str| -> Option<String> {
+            let content = &update[field];
+            if content["type"].as_str() != Some("text") {
+                return None;
+            }
+            let text = content["text"].as_str().unwrap_or_default();
+            (!text.is_empty()).then(|| text.to_string())
+        };
+        let progress = match kind {
+            "agent_message_chunk" => text("content").map(StreamEvent::Token),
+            "agent_thought_chunk" => {
+                text("content").map(|t| StreamEvent::Progress(AcpProgress::Thought { text: t }))
+            }
+            "tool_call" => {
+                let id = update["toolCallId"].as_str().unwrap_or_default();
+                let title = update["title"].as_str().unwrap_or_default();
+                if id.is_empty() || title.is_empty() {
+                    None
+                } else {
+                    if !view.reported_tool_ids.iter().any(|t| t == id) {
+                        view.reported_tool_ids.push(id.to_string());
+                    }
+                    let status = update["status"]
+                        .as_str()
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string);
+                    Some(StreamEvent::Progress(AcpProgress::ToolCall {
+                        tool_id: id.to_string(),
+                        title: title.to_string(),
+                        status,
+                    }))
+                }
+            }
+            "tool_call_update" => {
+                let id = update["toolCallId"].as_str().unwrap_or_default();
+                let status = update["status"].as_str().unwrap_or_default();
+                if id.is_empty()
+                    || status.is_empty()
+                    || !view.reported_tool_ids.iter().any(|t| t == id)
+                {
+                    None
+                } else {
+                    Some(StreamEvent::Progress(AcpProgress::ToolUpdate {
+                        tool_id: id.to_string(),
+                        status: status.to_string(),
+                    }))
+                }
+            }
+            _ => None,
+        };
+        return progress.into_iter().map(Ok).collect();
+    }
+    let Some(id) = msg.get("id").and_then(Value::as_u64) else {
+        return Vec::new();
+    };
+    if id != active {
+        return Vec::new();
+    }
+    if let Some(err) = msg.get("error") {
+        let message = err["message"].as_str().unwrap_or("unknown error");
+        return vec![Err(CloudError::Acp(message.to_string()))];
+    }
+    if msg.get("result").is_some() {
+        return vec![Ok(StreamEvent::Done)];
+    }
+    Vec::new()
+}
+
+/// The JSON-RPC requests written to an agent's stdin for one cancel command.
+/// Only the abandoned turn may be cancelled; a stale id, a repeat or a queued
+/// turn writes nothing. The request id is supplied by the caller because it
+/// comes from the client's id generator, not from the turn id.
+pub fn cancel_written_to_stdin(
+    session_id: &str,
+    active_id: Option<u64>,
+    _pending_id: Option<u64>,
+    already_cancelled: bool,
+    cancel_id: u64,
+    request_id: u64,
+) -> Vec<Value> {
+    if already_cancelled || active_id != Some(cancel_id) {
+        return Vec::new();
+    }
+    vec![request(
+        request_id,
+        "session/cancel",
+        json!({ "sessionId": session_id }),
+    )]
 }
 
 /// Directory every session is opened in. `cwd` decides which project
@@ -306,6 +416,7 @@ async fn run_session(
     let mut active: Option<(u64, Sink)> = None;
     let mut pending: Option<(u64, String, Sink)> = None;
     let mut cancelled = false;
+    let mut view = TurnView::default();
     loop {
         tokio::select! {
             cmd = rx.recv() => {
@@ -317,7 +428,7 @@ async fn run_session(
                             // the active turn and queue this one until its
                             // response arrives instead of sending a prompt
                             // it would reject.
-                            cancel_active(&mut stdin, &session_id, &active, &mut cancelled).await;
+                            cancel_active(&mut stdin, &session_id, &active, &pending, &mut cancelled).await;
                             if let Some((old_id, _, old)) = pending.take() {
                                 if old_id != id {
                                     let _ = old.send(Err(CloudError::Acp(
@@ -329,7 +440,11 @@ async fn run_session(
                             continue;
                         }
                         match send_prompt(&mut stdin, &session_id, id, text, sink).await {
-                            Ok(turn) => active = Some(turn),
+                            Ok(turn) => {
+                                active = Some(turn);
+                                view.active_prompt_id = Some(id);
+                                view.reported_tool_ids.clear();
+                            }
                             Err((sink, e)) => { let _ = sink.send(Err(e)); }
                         }
                         cancelled = false;
@@ -342,7 +457,7 @@ async fn run_session(
                             continue;
                         }
                         if active.as_ref().is_some_and(|(a, _)| *a == id) {
-                            cancel_active(&mut stdin, &session_id, &active, &mut cancelled).await;
+                            cancel_active(&mut stdin, &session_id, &active, &pending, &mut cancelled).await;
                         }
                     }
                     SessionCmd::Shutdown => {
@@ -372,44 +487,32 @@ async fn run_session(
                     let _ = write_msg(&mut stdin, &reply).await;
                     continue;
                 }
-                if msg.get("method").and_then(Value::as_str) == Some("session/update")
-                    && msg.get("id").is_none()
-                {
-                    if let Some((_, sink)) = active.as_ref() {
-                        let update = &msg["params"]["update"];
-                        if update["sessionUpdate"] == "agent_message_chunk"
-                            && update["content"]["type"] == "text"
-                        {
-                            let text = update["content"]["text"].as_str().unwrap_or_default();
-                            if !text.is_empty() {
-                                let _ = sink.send(Ok(StreamEvent::Token(text.to_string())));
+                view.active_prompt_id = active.as_ref().map(|(id, _)| *id);
+                let mut finished = false;
+                for evt in turn_events(&msg, &mut view) {
+                    match evt {
+                        Ok(StreamEvent::Done) => {
+                            if let Some((_, sink)) = active.as_ref() {
+                                let _ = sink.send(Ok(StreamEvent::Done));
+                            }
+                            finished = true;
+                        }
+                        Err(e) => {
+                            if let Some((_, sink)) = active.take() {
+                                let _ = sink.send(Err(e));
+                            }
+                            finished = true;
+                        }
+                        other => {
+                            if let Some((_, sink)) = active.as_ref() {
+                                let _ = sink.send(other);
                             }
                         }
                     }
-                    continue;
                 }
-                let Some(id) = msg.get("id").and_then(Value::as_u64) else { continue };
-                if let Some(err) = msg.get("error") {
-                    if active.as_ref().is_some_and(|(a, _)| *a == id) {
-                        let text = err["message"].as_str().unwrap_or("unknown error");
-                        if let Some((_, sink)) = active.take() {
-                            let _ = sink.send(Err(CloudError::Acp(text.to_string())));
-                        }
-                        start_pending(
-                            &mut stdin,
-                            &session_id,
-                            &mut active,
-                            &mut pending,
-                            &mut cancelled,
-                        )
-                        .await;
-                    }
-                    continue;
-                }
-                if active.as_ref().is_some_and(|(a, _)| *a == id) {
-                    if let Some((_, sink)) = active.take() {
-                        let _ = sink.send(Ok(StreamEvent::Done));
-                    }
+                if finished {
+                    let _ = active.take();
+                    view.reported_tool_ids.clear();
                     start_pending(
                         &mut stdin,
                         &session_id,
@@ -447,21 +550,34 @@ async fn start_pending(
 }
 
 /// Send `session/cancel` once for the active turn. The flag is per turn:
-/// `start_pending` clears it when the next prompt goes out.
+/// `start_pending` clears it when the next prompt goes out. The request lines
+/// come from the same observation seam the cancellation test drives.
 async fn cancel_active(
     stdin: &mut Stdin,
     session_id: &str,
     active: &Option<(u64, Sink)>,
+    pending: &Option<(u64, String, Sink)>,
     cancelled: &mut bool,
 ) {
-    if !*cancelled && active.is_some() {
-        let req = request(
-            next_id(),
-            "session/cancel",
-            json!({ "sessionId": session_id }),
-        );
+    let active_id = active.as_ref().map(|(id, _)| *id);
+    let Some(cancel_id) = active_id else {
+        return;
+    };
+    let pending_id = pending.as_ref().map(|(id, _, _)| *id);
+    let requests = cancel_written_to_stdin(
+        session_id,
+        active_id,
+        pending_id,
+        *cancelled,
+        cancel_id,
+        next_id(),
+    );
+    if requests.is_empty() {
+        return;
+    }
+    *cancelled = true;
+    for req in requests {
         let _ = write_msg(stdin, &req).await;
-        *cancelled = true;
     }
 }
 
@@ -728,6 +844,276 @@ mod tests {
             Step::Send(v) => v["method"].as_str().unwrap(),
             other => panic!("expected a request, got {other:?}"),
         }
+    }
+
+    fn update(method: &str, update: Value) -> Value {
+        json!({
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": { "update": update }
+        })
+    }
+
+    fn turn_view(active_id: Option<u64>, reported_tool_ids: &[&str]) -> TurnView {
+        TurnView {
+            active_prompt_id: active_id,
+            reported_tool_ids: reported_tool_ids.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    fn ok_events(msg: &Value, view: &mut TurnView) -> Vec<StreamEvent> {
+        turn_events(msg, view)
+            .into_iter()
+            .map(|r| r.expect("expected an Ok stream event"))
+            .collect()
+    }
+
+    fn progress_of(evt: &StreamEvent) -> &AcpProgress {
+        match evt {
+            StreamEvent::Progress(p) => p,
+            other => panic!("expected progress, got {other:?}"),
+        }
+    }
+
+    /// Given an active ACP prompt and an `agent_message_chunk` with non-empty text
+    /// When the notification is observed
+    /// Then exactly one Token event is returned and no Progress event is returned (retained)
+    /// Given the same active turn and an `agent_thought_chunk` with a non-empty text part
+    /// When observed
+    /// Then one Progress(Thought) event carries that exact text and no Token event is produced
+    /// And empty text, a non-text part and no active turn emit nothing
+    /// Given a `tool_call` with id, title and status on the same turn
+    /// When observed through the same seam
+    /// Then one Progress(ToolCall) event carries id, title and status, raw input is absent,
+    /// And the call id becomes reported state produced by that observation
+    /// Given the following `tool_call_update` for that produced id with a changed status
+    /// When observed through the same seam
+    /// Then one Progress(ToolUpdate) event carries the same id and the changed status, raw output is absent
+    /// And an update with no reported call, an unreported id, or no active turn emits nothing
+    /// Given unknown, empty-text and no-active-turn notifications
+    /// When observed
+    /// Then no progress event is emitted
+    /// Given a matching prompt result and a matching error
+    /// When observed
+    /// Then Done and CloudError::Acp are unchanged; non-matching ids emit nothing (retained)
+    #[test]
+    fn agent_message_chunk_still_emits_one_token_and_no_progress() {
+        let msg = update(
+            "session/update",
+            json!({
+                "sessionUpdate": "agent_message_chunk",
+                "content": { "type": "text", "text": "reply " }
+            }),
+        );
+        let mut view = turn_view(Some(7), &[]);
+        assert_eq!(
+            ok_events(&msg, &mut view),
+            vec![StreamEvent::Token("reply ".into())]
+        );
+        assert!(view.reported_tool_ids.is_empty());
+
+        let thought = update(
+            "session/update",
+            json!({
+                "sessionUpdate": "agent_thought_chunk",
+                "content": { "type": "text", "text": "thinking out loud" }
+            }),
+        );
+        assert_eq!(
+            ok_events(&thought, &mut turn_view(Some(7), &[])),
+            vec![StreamEvent::Progress(AcpProgress::Thought {
+                text: "thinking out loud".into(),
+            })]
+        );
+        assert!(ok_events(&thought, &mut turn_view(None, &[])).is_empty());
+
+        let empty_thought = update(
+            "session/update",
+            json!({
+                "sessionUpdate": "agent_thought_chunk",
+                "content": { "type": "text", "text": "" }
+            }),
+        );
+        assert!(ok_events(&empty_thought, &mut turn_view(Some(7), &[])).is_empty());
+
+        let non_text_thought = update(
+            "session/update",
+            json!({
+                "sessionUpdate": "agent_thought_chunk",
+                "content": { "type": "image", "text": "x" }
+            }),
+        );
+        assert!(ok_events(&non_text_thought, &mut turn_view(Some(7), &[])).is_empty());
+
+        let input_sentinel = "RAW-INPUT-SENTINEL-DO-NOT-EMIT";
+        let tool_call = update(
+            "session/update",
+            json!({
+                "sessionUpdate": "tool_call",
+                "toolCallId": "call-1",
+                "title": "Read file",
+                "status": "pending",
+                "rawInput": { "secret": input_sentinel }
+            }),
+        );
+        let mut view = turn_view(Some(7), &[]);
+        let call_events = ok_events(&tool_call, &mut view);
+        assert_eq!(
+            call_events,
+            vec![StreamEvent::Progress(AcpProgress::ToolCall {
+                tool_id: "call-1".into(),
+                title: "Read file".into(),
+                status: Some("pending".into()),
+            })]
+        );
+        assert_eq!(view.reported_tool_ids, vec!["call-1".to_string()]);
+
+        let call_wire = serde_json::to_value(progress_of(&call_events[0])).unwrap();
+        assert_eq!(
+            call_wire,
+            json!({
+                "stage": "tool_call",
+                "tool_id": "call-1",
+                "title": "Read file",
+                "status": "pending"
+            })
+        );
+        assert!(call_wire.get("input").is_none());
+        assert!(!call_wire.to_string().contains(input_sentinel));
+        assert!(ok_events(&tool_call, &mut turn_view(None, &[])).is_empty());
+
+        let output_sentinel = "RAW-OUTPUT-SENTINEL-DO-NOT-EMIT";
+        let tool_update = update(
+            "session/update",
+            json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call-1",
+                "status": "completed",
+                "rawOutput": { "blob": output_sentinel }
+            }),
+        );
+        let update_events = ok_events(&tool_update, &mut view);
+        assert_eq!(
+            update_events,
+            vec![StreamEvent::Progress(AcpProgress::ToolUpdate {
+                tool_id: "call-1".into(),
+                status: "completed".into(),
+            })]
+        );
+        let update_wire = serde_json::to_value(progress_of(&update_events[0])).unwrap();
+        assert_eq!(
+            update_wire,
+            json!({
+                "stage": "tool_update",
+                "tool_id": "call-1",
+                "status": "completed"
+            })
+        );
+        assert!(update_wire.get("output").is_none());
+        assert!(!update_wire.to_string().contains(output_sentinel));
+
+        assert!(ok_events(&tool_update, &mut turn_view(Some(7), &[])).is_empty());
+        assert!(ok_events(&tool_update, &mut turn_view(Some(7), &["call-2"])).is_empty());
+        assert!(ok_events(&tool_update, &mut turn_view(None, &["call-1"])).is_empty());
+
+        let negatives = [
+            json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": ""}}),
+            json!({"sessionUpdate": "tool_call", "title": "no id"}),
+            json!({"sessionUpdate": "something_else", "content": {"type": "text", "text": "x"}}),
+        ];
+        for case in negatives {
+            assert!(ok_events(
+                &update("session/update", case),
+                &mut turn_view(Some(7), &[])
+            )
+            .is_empty());
+        }
+        let not_update = json!({"jsonrpc": "2.0", "method": "session/prompt", "params": {}});
+        assert!(ok_events(&not_update, &mut turn_view(Some(7), &[])).is_empty());
+
+        let done = json!({"jsonrpc": "2.0", "id": 7, "result": {"stopReason": "end_turn"}});
+        assert_eq!(
+            ok_events(&done, &mut turn_view(Some(7), &[])),
+            vec![StreamEvent::Done]
+        );
+        assert!(ok_events(&done, &mut turn_view(Some(8), &[])).is_empty());
+
+        let err = json!({"jsonrpc": "2.0", "id": 7, "error": {"message": "boom"}});
+        let mut err_it = turn_events(&err, &mut turn_view(Some(7), &[])).into_iter();
+        match err_it.next().expect("error event") {
+            Err(CloudError::Acp(message)) => assert_eq!(message, "boom"),
+            other => panic!("expected CloudError::Acp, got {other:?}"),
+        }
+        assert!(err_it.next().is_none());
+        assert!(ok_events(
+            &json!({"jsonrpc": "2.0", "id": 8, "error": {"message": "boom"}}),
+            &mut turn_view(Some(7), &[])
+        )
+        .is_empty());
+    }
+
+    fn cancel_writes(
+        session_id: &str,
+        active_id: Option<u64>,
+        pending_id: Option<u64>,
+        already_cancelled: bool,
+        cancel_id: u64,
+        request_id: u64,
+    ) -> Vec<Value> {
+        cancel_written_to_stdin(
+            session_id,
+            active_id,
+            pending_id,
+            already_cancelled,
+            cancel_id,
+            request_id,
+        )
+    }
+
+    /// Given an active turn 7 with no prior cancel and request id 41 supplied independently
+    /// When a drop for turn 7 is written to the in-memory agent stdin
+    /// Then exactly one session/cancel request is written with jsonrpc 2.0, request id 41 and sessionId s1
+    /// Given the same stale cancel id 7 while turn 8 is active
+    /// When written with request id 42
+    /// Then no session/cancel request is written
+    /// Given turn 8 is active and not yet cancelled
+    /// When turn 8 is dropped with request id 43
+    /// Then exactly one session/cancel request is written with request id 43 and sessionId s1
+    /// Given a repeated cancel after one was already written, or a queued turn with no active turn
+    /// When written
+    /// Then no session/cancel request is written
+    #[test]
+    fn cancellation_writes_only_the_abandoned_turn_id_to_agent_stdin() {
+        assert_eq!(
+            cancel_writes("s1", Some(7), None, false, 7, 41),
+            vec![json!({
+                "jsonrpc": "2.0",
+                "id": 41,
+                "method": "session/cancel",
+                "params": { "sessionId": "s1" }
+            })]
+        );
+
+        assert!(cancel_writes("s1", Some(8), None, false, 7, 42).is_empty());
+
+        let next_turn = cancel_writes("s1", Some(8), None, false, 8, 43);
+        assert_eq!(
+            next_turn,
+            vec![json!({
+                "jsonrpc": "2.0",
+                "id": 43,
+                "method": "session/cancel",
+                "params": { "sessionId": "s1" }
+            })]
+        );
+        assert_eq!(next_turn.len(), 1);
+
+        assert!(cancel_writes("s1", Some(7), None, true, 7, 44).is_empty());
+        assert!(cancel_writes("s1", None, Some(9), false, 9, 45).is_empty());
+
+        let other_session = cancel_writes("s2", Some(7), None, false, 7, 46);
+        assert_eq!(other_session.len(), 1);
+        assert_eq!(other_session[0]["params"]["sessionId"], "s2");
     }
 
     #[test]
