@@ -60,10 +60,31 @@ struct Delta {
     content: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+/// Work an ACP agent reports while a turn is in flight. Raw tool input and
+/// output are deliberately absent: only the fields safe to display are kept.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "stage", rename_all = "snake_case")]
+pub enum AcpProgress {
+    Thought {
+        text: String,
+    },
+    ToolCall {
+        tool_id: String,
+        title: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        status: Option<String>,
+    },
+    ToolUpdate {
+        tool_id: String,
+        status: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StreamEvent {
     Token(String),
     Done,
+    Progress(AcpProgress),
 }
 
 pub type TokenStream = Pin<Box<dyn Stream<Item = Result<StreamEvent, CloudError>> + Send>>;
@@ -725,7 +746,7 @@ mod tests {
             .into_iter()
             .filter_map(|r| match r.ok()? {
                 StreamEvent::Token(t) => Some(t),
-                StreamEvent::Done => None,
+                StreamEvent::Done | StreamEvent::Progress(_) => None,
             })
             .collect();
         assert_eq!(tokens.join(""), "Hello");

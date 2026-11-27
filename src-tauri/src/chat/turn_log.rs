@@ -9,17 +9,105 @@ use super::events::ChatEventOut;
 use super::speak::sanitize_for_tts;
 use super::ChatService;
 use crate::settings;
+#[cfg(test)]
+use komorebi_cloud::AcpProgress;
 use komorebi_cloud::AcpTurnRecord;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager, Wry};
 
 const ENV_VAR: &str = "KOMOREBI_TURN_LOG";
+
+/// Turn-opening values kept across the separate calls to the emission
+/// boundary. Production stores one per active turn; the probe supplies its own.
+#[derive(Clone)]
+pub(super) struct EmissionState {
+    pub id: String,
+    pub prompt: String,
+    pub ts: String,
+    pub context: Value,
+    pub begin_ms: u64,
+    pub acp: Option<AcpTurnRecord>,
+    route: Option<String>,
+    first_token_ms: Option<u64>,
+    streamed: String,
+}
+
+fn states() -> &'static Mutex<HashMap<String, EmissionState>> {
+    static STATES: OnceLock<Mutex<HashMap<String, EmissionState>>> = OnceLock::new();
+    STATES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn app_slot() -> &'static Mutex<Option<AppHandle<Wry>>> {
+    static APP: OnceLock<Mutex<Option<AppHandle<Wry>>>> = OnceLock::new();
+    APP.get_or_init(|| Mutex::new(None))
+}
+
+pub(super) fn bind_app(app: &AppHandle<Wry>) {
+    if let Ok(mut slot) = app_slot().lock() {
+        *slot = Some(app.clone());
+    }
+}
+
+pub(super) fn app_handle() -> Option<AppHandle<Wry>> {
+    app_slot().lock().ok()?.clone()
+}
+
+pub(super) fn active_log_path() -> &'static Path {
+    path().map(|p| p.as_path()).unwrap_or_else(|| Path::new(""))
+}
+
+pub(super) fn emission_state(id: &str) -> EmissionState {
+    states()
+        .lock()
+        .ok()
+        .and_then(|s| s.get(id).cloned())
+        .unwrap_or_else(|| EmissionState {
+            id: id.to_string(),
+            prompt: String::new(),
+            ts: String::new(),
+            context: json!({}),
+            begin_ms: 0,
+            acp: None,
+            route: None,
+            first_token_ms: None,
+            streamed: String::new(),
+        })
+}
+
+pub(super) fn seed_recorder(rec: &mut Recorder, id: &str) {
+    let Some(state) = states().lock().ok().and_then(|s| s.get(id).cloned()) else {
+        return;
+    };
+    rec.seed(&state);
+}
+
+pub(super) fn store_recorder(rec: &Recorder, id: &str) {
+    if let Ok(mut states) = states().lock() {
+        if let Some(state) = rec.state(id) {
+            states.insert(id.to_string(), state);
+        } else {
+            states.remove(id);
+        }
+    }
+}
+
+pub(super) fn enrich(line: &mut Value) {
+    let Some(app) = app_handle() else { return };
+    line["model_label"] = json!(model_label(&app, line));
+    line["cancelled"] = json!(app
+        .try_state::<Arc<ChatService>>()
+        .map(|s| s.cancel.load(Ordering::SeqCst))
+        .unwrap_or(false));
+    if let Some(reply) = line["reply"].as_str() {
+        line["spoken"] = json!(sanitize_for_tts(reply));
+    }
+}
 
 fn path() -> Option<&'static PathBuf> {
     static PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
@@ -31,19 +119,14 @@ fn path() -> Option<&'static PathBuf> {
     .as_ref()
 }
 
-fn recorder() -> &'static Mutex<Recorder> {
-    static RECORDER: OnceLock<Mutex<Recorder>> = OnceLock::new();
-    RECORDER.get_or_init(|| Mutex::new(Recorder::default()))
-}
-
-fn now_ms() -> u64 {
+pub(super) fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
 }
 
-fn append(path: &PathBuf, line: &Value) {
+pub(super) fn append(path: &Path, line: &Value) {
     let result = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -70,8 +153,21 @@ pub(super) fn begin(app: &AppHandle<Wry>, id: &str, prompt: &str, has_image: boo
         "has_image": has_image,
     });
     let ts = chrono::Utc::now().to_rfc3339();
-    if let Ok(mut r) = recorder().lock() {
-        r.begin(id, prompt, &ts, context, now_ms());
+    if let Ok(mut states) = states().lock() {
+        states.insert(
+            id.to_string(),
+            EmissionState {
+                id: id.to_string(),
+                prompt: prompt.to_string(),
+                ts,
+                context,
+                begin_ms: now_ms(),
+                acp: None,
+                route: None,
+                first_token_ms: None,
+                streamed: String::new(),
+            },
+        );
     }
 }
 
@@ -81,28 +177,11 @@ pub(super) fn record_acp(id: &str, record: &AcpTurnRecord) {
     if path().is_none() {
         return;
     }
-    if let Ok(mut r) = recorder().lock() {
-        r.record_acp(id, record);
+    if let Ok(mut states) = states().lock() {
+        if let Some(state) = states.get_mut(id) {
+            state.acp = Some(record.clone());
+        }
     }
-}
-
-/// Feeds one outbound chat event; writes the line when the turn ends.
-pub(super) fn observe(app: &AppHandle<Wry>, evt: &ChatEventOut) {
-    let Some(path) = path() else { return };
-    let finished = match recorder().lock() {
-        Ok(mut r) => r.on_event(evt, now_ms()),
-        Err(_) => None,
-    };
-    let Some(mut line) = finished else { return };
-    line["model_label"] = json!(model_label(app, &line));
-    line["cancelled"] = json!(app
-        .try_state::<Arc<ChatService>>()
-        .map(|s| s.cancel.load(Ordering::SeqCst))
-        .unwrap_or(false));
-    if let Some(reply) = line["reply"].as_str() {
-        line["spoken"] = json!(sanitize_for_tts(reply));
-    }
-    append(path, &line);
 }
 
 /// Marks where the conversation history was cleared.
@@ -164,7 +243,7 @@ fn label_for(route: Option<&str>, l: &Labels<'_>) -> String {
 }
 
 #[derive(Default)]
-struct Recorder {
+pub(super) struct Recorder {
     pending: HashMap<String, Pending>,
 }
 
@@ -177,14 +256,50 @@ struct Pending {
 }
 
 impl Recorder {
+    /// Restore the fields accumulated across the separate probe calls.
+    pub(super) fn seed(&mut self, state: &EmissionState) {
+        self.begin(
+            &state.id,
+            &state.prompt,
+            &state.ts,
+            state.context.clone(),
+            state.begin_ms,
+        );
+        if let Some(p) = self.pending.get_mut(&state.id) {
+            if let Some(route) = &state.route {
+                p.line["route"] = json!(route);
+            }
+            p.first_token_ms = state.first_token_ms;
+            p.streamed = state.streamed.clone();
+        }
+        if let Some(record) = &state.acp {
+            self.record_acp(&state.id, record);
+        }
+    }
+
+    pub(super) fn state(&self, id: &str) -> Option<EmissionState> {
+        let p = self.pending.get(id)?;
+        Some(EmissionState {
+            id: id.to_string(),
+            prompt: p.line["prompt"].as_str().unwrap_or_default().to_string(),
+            ts: p.line["ts"].as_str().unwrap_or_default().to_string(),
+            context: p.line["context"].clone(),
+            begin_ms: p.started_ms,
+            acp: p.acp.clone(),
+            route: p.line["route"].as_str().map(str::to_string),
+            first_token_ms: p.first_token_ms,
+            streamed: p.streamed.clone(),
+        })
+    }
+
     /// Held until Done: a failed request must not leave metadata on its line.
-    fn record_acp(&mut self, id: &str, record: &AcpTurnRecord) {
+    pub(super) fn record_acp(&mut self, id: &str, record: &AcpTurnRecord) {
         if let Some(p) = self.pending.get_mut(id) {
             p.acp = Some(record.clone());
         }
     }
 
-    fn begin(&mut self, id: &str, prompt: &str, ts: &str, context: Value, now: u64) {
+    pub(super) fn begin(&mut self, id: &str, prompt: &str, ts: &str, context: Value, now: u64) {
         let line = json!({
             "ts": ts,
             "id": id,
@@ -204,7 +319,7 @@ impl Recorder {
         );
     }
 
-    fn on_event(&mut self, evt: &ChatEventOut, now: u64) -> Option<Value> {
+    pub(super) fn on_event(&mut self, evt: &ChatEventOut, now: u64) -> Option<Value> {
         match evt {
             // A skill falling back to the LLM emits Started twice; the
             // last route is the one that answered.
@@ -214,6 +329,9 @@ impl Recorder {
                 }
                 None
             }
+            // Progress is visible in the bubble but is never reply text,
+            // speech or a turn-log field.
+            ChatEventOut::Progress { .. } => None,
             ChatEventOut::Token { id, text } => {
                 if let Some(p) = self.pending.get_mut(id) {
                     p.first_token_ms.get_or_insert(now);
@@ -283,6 +401,13 @@ mod tests {
         ChatEventOut::Token {
             id: id.into(),
             text: text.into(),
+        }
+    }
+
+    fn progress(id: &str, p: AcpProgress) -> ChatEventOut {
+        ChatEventOut::Progress {
+            id: id.into(),
+            progress: p,
         }
     }
 
@@ -512,19 +637,31 @@ mod tests {
         assert!(r.pending.is_empty());
     }
 
-    /// Given an ACP turn whose request fails after its record was attached, an ACP turn
-    ///   that fails before Started, and an unknown turn id with an attached record
-    /// When error events and an unknown-turn token are observed
-    /// Then no session_prompt_text, system_roles or system_message_count field is written to any line
+    /// Given an ACP turn whose request fails after its record was attached, with a progress event first
+    /// When the error event is observed
+    /// Then no session_prompt_text, system_roles or system_message_count field is written
     /// And error/first_token_ms/reply and unknown-turn handling are unchanged (retained)
+    /// And no progress sentinel appears in the line
     #[test]
     fn records_errors_and_ignores_unknown_turns() {
         let mut r = Recorder::default();
         r.record_acp("ghost", &acp_first_record());
         assert!(r.on_event(&token("ghost", "x"), 5).is_none());
+
         r.begin("t2", "hi", "ts", json!({}), 0);
         assert!(r.on_event(&started("t2", "acp"), 1).is_none());
         r.record_acp("t2", &acp_first_record());
+        assert!(r
+            .on_event(
+                &progress(
+                    "t2",
+                    AcpProgress::Thought {
+                        text: "LOG-SENTINEL-THOUGHT".into()
+                    }
+                ),
+                2
+            )
+            .is_none());
         let line = r
             .on_event(
                 &ChatEventOut::Error {
@@ -540,6 +677,7 @@ mod tests {
         assert!(line.get("session_prompt_text").is_none());
         assert!(line.get("system_roles").is_none());
         assert!(line.get("system_message_count").is_none());
+        assert!(!line.to_string().contains("LOG-SENTINEL-THOUGHT"));
         assert!(r.pending.is_empty());
 
         r.begin("t3", "hi", "ts", json!({}), 0);

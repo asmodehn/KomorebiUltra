@@ -7,7 +7,16 @@ export type ChatEvent =
   | { kind: "started"; id: string; route: "local" | "cloud" | "skill" | "acp" }
   | { kind: "token"; id: string; text: string }
   | { kind: "done"; id: string; full_text: string }
-  | { kind: "error"; id: string; message: string };
+  | { kind: "error"; id: string; message: string }
+  | {
+      kind: "progress";
+      id: string;
+      stage: "thought" | "tool_call" | "tool_update";
+      text?: string;
+      tool_id?: string;
+      title?: string;
+      status?: string;
+    };
 
 export type Mode = "auto" | "local" | "cloud";
 

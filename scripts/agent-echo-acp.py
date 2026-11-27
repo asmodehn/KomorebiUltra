@@ -52,6 +52,22 @@ for raw in sys.stdin:
         if out:
             with open(out, "a", encoding="utf-8") as log:
                 log.write(text + "\n---\n")
+
+        thought = os.environ.get("KOMOREBI_ECHO_THOUGHT")
+        if thought:
+            send({
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "sessionId": params.get("sessionId", "echo-session"),
+                    "update": {
+                        "sessionUpdate": "agent_thought_chunk",
+                        "content": {"type": "text", "text": thought},
+                    },
+                },
+            })
+
+        answer = os.environ.get("KOMOREBI_ECHO_ANSWER", text)
         send({
             "jsonrpc": "2.0",
             "method": "session/update",
@@ -59,7 +75,7 @@ for raw in sys.stdin:
                 "sessionId": params.get("sessionId", "echo-session"),
                 "update": {
                     "sessionUpdate": "agent_message_chunk",
-                    "content": {"type": "text", "text": text},
+                    "content": {"type": "text", "text": answer},
                 },
             },
         })
